@@ -385,6 +385,7 @@ pub fn parse_line(raw: &str) -> SignLineData {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_component_text(raw: &str) -> String {
     parse_line(raw).text
 }
