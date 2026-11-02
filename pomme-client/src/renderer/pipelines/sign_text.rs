@@ -185,7 +185,7 @@ impl SignTextPipeline {
                     if !is_front {
                         m *= Mat4::from_rotation_y(PI);
                     }
-                    m *= Mat4::from_translation(Vec3::new(0.0, -0.32, 0.073))
+                    m *= Mat4::from_translation(Vec3::new(0.0, -0.32, 0.076))
                         * Mat4::from_scale(s * 0.014_062_5);
                 } else {
                     m *= Mat4::from_translation(Vec3::splat(0.5))
@@ -196,7 +196,7 @@ impl SignTextPipeline {
                     if !is_front {
                         m *= Mat4::from_rotation_y(PI);
                     }
-                    m *= Mat4::from_translation(Vec3::new(0.0, 1.0 / 3.0, 0.046_666_667))
+                    m *= Mat4::from_translation(Vec3::new(0.0, 1.0 / 3.0, 0.052))
                         * Mat4::from_scale(s * 0.010_416_667);
                 }
 
@@ -207,7 +207,6 @@ impl SignTextPipeline {
                     continue;
                 }
 
-                let near = dist_sq < 256.0;
                 let default_dark = get_dark_color(side.color_rgb, side.glowing);
 
                 for (line_idx, line) in side.messages.iter().enumerate() {
@@ -218,11 +217,7 @@ impl SignTextPipeline {
                     let effective_rgb = line.color_rgb.unwrap_or(side.color_rgb);
                     let (text_color, outline_color, light_val) = if side.glowing {
                         let c = rgb_to_vec4(effective_rgb);
-                        let outline = if effective_rgb == 0 || near {
-                            Some(get_dark_color(effective_rgb, true))
-                        } else {
-                            None
-                        };
+                        let outline = Some(get_dark_color(effective_rgb, true));
                         (
                             c,
                             outline,
@@ -405,5 +400,8 @@ fn first_line(line: &str, max_width: f32, glyph_map: &GlyphMap) -> String {
 }
 
 fn text_width(line: &str, glyph_map: &GlyphMap) -> f32 {
-    line.chars().map(|c| glyph_map.glyph(c, None).advance).sum::<f32>().ceil()
+    line.chars()
+        .map(|c| glyph_map.glyph(c, None).advance)
+        .sum::<f32>()
+        .ceil()
 }

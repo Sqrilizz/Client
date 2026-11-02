@@ -15,8 +15,7 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     float coverage = texture(sampler2DArray(font_tex, font_tex_sampler), vec3(v_uv, v_layer)).r;
-    if (coverage < 0.5) discard;
-    vec4 color = vec4(v_color.rgb, 1.0);
-    color.rgb = apply_fog(color.rgb, v_fog, v_fog_color);
-    out_color = color;
+    if (coverage <= 0.05) discard;
+    vec3 color = apply_fog(v_color.rgb, v_fog, v_fog_color);
+    out_color = vec4(color, v_color.a * coverage);
 }

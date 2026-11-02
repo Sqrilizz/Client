@@ -313,6 +313,11 @@ fn extract_json_text(v: &serde_json::Value, out: &mut String) {
             if let Some(extra) = map.get("extra") {
                 extract_json_text(extra, out);
             }
+            if let Some(t) = map.get("translate").and_then(|v| v.as_str()) {
+                if map.get("text").is_none() {
+                    out.push_str(t);
+                }
+            }
         }
         _ => {}
     }
@@ -378,6 +383,28 @@ fn extract_first_code_color(text: &str) -> (String, Option<u32>) {
         out.push(c);
     }
     (out, color)
+}
+
+fn extract_nbt_compound_text(c: &NbtCompound, out: &mut String, color: &mut Option<u32>) {
+    if let Some(s) = c.string("text") {
+        out.push_str(&s.to_str());
+    }
+    if color.is_none() {
+        if let Some(col) = c.string("color") {
+            *color = dye_color_rgb(&col.to_str()).or_else(|| named_color_rgb(&col.to_str()));
+        }
+    }
+    if let Some(extra) = c.list("extra") {
+        if let Some(extra_strings) = extra.strings() {
+            for es in extra_strings.iter() {
+                out.push_str(&es.to_str());
+            }
+        } else if let Some(extra_compounds) = extra.compounds() {
+            for ec in extra_compounds {
+                extract_nbt_compound_text(&ec, out, color);
+            }
+        }
+    }
 }
 
 pub fn parse_line(raw: &str) -> SignLineData {
@@ -494,17 +521,13 @@ pub fn parse_sign_render_info(
                 } else if let Some(compounds) = list.compounds() {
                     for (i, c) in compounds.into_iter().enumerate().take(4) {
                         let mut text = String::new();
-                        if let Some(s) = c.string("text") {
-                            text.push_str(&s.to_str());
+                        let mut color = None;
+                        extract_nbt_compound_text(&c, &mut text, &mut color);
+                        let mut parsed = parse_line(&text);
+                        if parsed.color_rgb.is_none() {
+                            parsed.color_rgb = color;
                         }
-                        if let Some(extra) = c.list("extra") {
-                            if let Some(extra_strings) = extra.strings() {
-                                for es in extra_strings.iter() {
-                                    text.push_str(&es.to_str());
-                                }
-                            }
-                        }
-                        messages[i] = parse_line(&text);
+                        messages[i] = parsed;
                     }
                 }
             }
@@ -574,11 +597,23 @@ mod tests {
 
     #[test]
     fn test_parse_component_text() {
-        assert_eq!(parse_component_text("{\"text\":\"Leaderboard\"}"), "Leaderboard");
+        assert_eq!(
+            parse_component_text("{\"text\":\"Leaderboard\"}"),
+            "Leaderboard"
+        );
         assert_eq!(parse_component_text("\"Hello\""), "Hello");
         assert_eq!(parse_component_text("\"\""), "");
-        assert_eq!(parse_component_text("[\"\",{\"text\":\"лидеров\",\"color\":\"gold\"}]"), "лидеров");
-        assert_eq!(parse_component_text(r#""[\"\",{\"text\":\"лидеров\",\"color\":\"gold\"}]""#), "лидеров");
-        assert_eq!(parse_component_text(r#"{"text":"","extra":[{"text":"Топ "},{"text":"лидеров"}]}"#), "Топ лидеров");
+        assert_eq!(
+            parse_component_text("[\"\",{\"text\":\"лидеров\",\"color\":\"gold\"}]"),
+            "лидеров"
+        );
+        assert_eq!(
+            parse_component_text(r#""[\"\",{\"text\":\"лидеров\",\"color\":\"gold\"}]""#),
+            "лидеров"
+        );
+        assert_eq!(
+            parse_component_text(r#"{"text":"","extra":[{"text":"Топ "},{"text":"лидеров"}]}"#),
+            "Топ лидеров"
+        );
     }
 }
