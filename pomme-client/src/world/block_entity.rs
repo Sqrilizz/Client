@@ -1,20 +1,14 @@
 use std::collections::HashMap;
 
 use azalea_registry::builtin::BlockEntityKind;
-use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
 use crate::position::BlockPos;
-use crate::renderer::pipelines::menu_overlay::MenuElement;
-use crate::ui::text::TextSpan;
-use crate::world::block::{BlockStateData, BlockStateTable};
-use crate::world::chunk::ChunkStore;
-
+use crate::renderer::chunk::block_lighter::LightLevels;
+use crate::world::block::BlockStateData;
 #[derive(Clone)]
 pub struct StoredBlockEntity {
-    #[allow(dead_code)]
     pub kind: BlockEntityKind,
-    #[allow(dead_code)]
     pub nbt: NbtCompound,
 }
 
@@ -197,229 +191,187 @@ pub fn is_fluid_block(name: &str) -> bool {
     matches!(name, "water" | "lava" | "bubble_column")
 }
 
-fn parse_sign_line(raw: &str, default_color: [f32; 4]) -> Vec<TextSpan> {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SignSideData {
+    pub messages: [String; 4],
+    pub color_rgb: u32,
+    pub glowing: bool,
+}
+
+impl SignSideData {
+    pub fn is_empty(&self) -> bool {
+        self.messages.iter().all(String::is_empty)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SignRenderInfo {
+    pub pos: BlockPos,
+    pub is_wall: bool,
+    pub is_hanging: bool,
+    pub angle: f32,
+    pub front: SignSideData,
+    pub back: SignSideData,
+    pub light: LightLevels,
+}
+
+pub fn dye_color_rgb(name: &str) -> Option<u32> {
+    match name {
+        "white" => Some(0xFFFFFF),
+        "orange" => Some(0xFF681F),
+        "magenta" => Some(0xFF00FF),
+        "light_blue" => Some(0x9AC0CD),
+        "yellow" => Some(0xFFFF00),
+        "lime" => Some(0xBFFF00),
+        "pink" => Some(0xFF69B4),
+        "gray" => Some(0x808080),
+        "light_gray" => Some(0xD3D3D3),
+        "cyan" => Some(0x00FFFF),
+        "purple" => Some(0xA020F0),
+        "blue" => Some(0x0000FF),
+        "brown" => Some(0x8B4513),
+        "green" => Some(0x00FF00),
+        "red" => Some(0xFF0000),
+        "black" => Some(0x000000),
+        _ => None,
+    }
+}
+
+pub fn parse_component_text(raw: &str) -> String {
     if raw.is_empty() || raw == "\"\"" {
-        return Vec::new();
+        return String::new();
     }
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Ok(comp) = crate::chat_component::Component::from_value(&value) {
-            let spans = crate::ui::text::format_component_spans(&comp, default_color);
-            if !spans.is_empty() && spans.iter().any(|s| !s.text.is_empty()) {
-                return spans;
+        match value {
+            serde_json::Value::String(s) => return s,
+            serde_json::Value::Object(map) => {
+                let mut out = String::new();
+                if let Some(serde_json::Value::String(t)) = map.get("text") {
+                    out.push_str(t);
+                }
+                if let Some(serde_json::Value::Array(extra)) = map.get("extra") {
+                    for item in extra {
+                        if let Some(t) = item.as_str() {
+                            out.push_str(t);
+                        } else if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                            out.push_str(t);
+                        }
+                    }
+                }
+                return out;
             }
+            _ => {}
         }
     }
-    let text = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
-        &raw[1..raw.len() - 1]
+    if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+        raw[1..raw.len() - 1].to_string()
     } else {
-        raw
+        raw.to_string()
+    }
+}
+
+pub fn parse_sign_render_info(
+    pos: BlockPos,
+    kind: BlockEntityKind,
+    nbt: &NbtCompound,
+    block_id: &str,
+    props: &crate::world::block::PropMap,
+    light: LightLevels,
+) -> Option<SignRenderInfo> {
+    if !matches!(kind, BlockEntityKind::Sign | BlockEntityKind::HangingSign) {
+        return None;
+    }
+    let is_wall = block_id.ends_with("_wall_sign") || block_id.ends_with("_wall_hanging_sign");
+    let is_hanging = block_id.contains("hanging_sign");
+    let angle = if is_wall {
+        let facing = props.get("facing").unwrap_or("north");
+        match facing {
+            "south" => 0.0,
+            "west" => 90.0,
+            "north" => 180.0,
+            "east" => 270.0,
+            _ => 0.0,
+        }
+    } else {
+        props
+            .get("rotation")
+            .and_then(|r| r.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            * 22.5
     };
-    if text.is_empty() {
-        Vec::new()
+
+    let parse_side = |tag: Option<&NbtCompound>| -> SignSideData {
+        let mut messages = [String::new(), String::new(), String::new(), String::new()];
+        let mut color_rgb = 0u32;
+        let mut glowing = false;
+        if let Some(t) = tag {
+            if let Some(color_name) = t.string("color") {
+                if let Some(rgb) = dye_color_rgb(&color_name.to_str()) {
+                    color_rgb = rgb;
+                }
+            }
+            if let Some(b) = t.byte("has_glowing_text") {
+                glowing = b != 0;
+            }
+            if let Some(list) = t.list("messages") {
+                if let Some(strings) = list.strings() {
+                    for (i, s) in strings.iter().enumerate().take(4) {
+                        messages[i] = parse_component_text(&s.to_str());
+                    }
+                } else if let Some(compounds) = list.compounds() {
+                    for (i, c) in compounds.into_iter().enumerate().take(4) {
+                        if let Some(text) = c.string("text") {
+                            messages[i] = text.to_str().into_owned();
+                        }
+                    }
+                }
+            }
+        }
+        SignSideData {
+            messages,
+            color_rgb,
+            glowing,
+        }
+    };
+
+    let (front, back) = if let Some(front_compound) = nbt.compound("front_text") {
+        let back_compound = nbt.compound("back_text");
+        (parse_side(Some(front_compound)), parse_side(back_compound))
     } else {
-        vec![TextSpan::new(text.to_string(), default_color)]
+        let mut messages = [String::new(), String::new(), String::new(), String::new()];
+        for (i, key) in ["Text1", "Text2", "Text3", "Text4"].iter().enumerate() {
+            if let Some(s) = nbt.string(key) {
+                messages[i] = parse_component_text(&s.to_str());
+            }
+        }
+        let color_rgb = nbt
+            .string("Color")
+            .and_then(|c| dye_color_rgb(&c.to_str()))
+            .unwrap_or(0);
+        let glowing = nbt.byte("GlowingText").is_some_and(|b| b != 0);
+        (
+            SignSideData {
+                messages,
+                color_rgb,
+                glowing,
+            },
+            SignSideData::default(),
+        )
+    };
+
+    if front.is_empty() && back.is_empty() {
+        return None;
     }
-}
 
-fn sign_dye_color(name: Option<&str>) -> [f32; 4] {
-    match name {
-        Some("white") => [0.976, 1.0, 0.996, 1.0],
-        Some("orange") => [0.976, 0.537, 0.110, 1.0],
-        Some("magenta") => [0.780, 0.282, 0.737, 1.0],
-        Some("light_blue") => [0.400, 0.698, 0.898, 1.0],
-        Some("yellow") => [0.996, 0.851, 0.243, 1.0],
-        Some("lime") => [0.502, 0.776, 0.122, 1.0],
-        Some("pink") => [0.953, 0.553, 0.671, 1.0],
-        Some("gray") => [0.278, 0.314, 0.322, 1.0],
-        Some("light_gray") => [0.620, 0.620, 0.592, 1.0],
-        Some("cyan") => [0.086, 0.490, 0.529, 1.0],
-        Some("purple") => [0.533, 0.200, 0.710, 1.0],
-        Some("blue") => [0.235, 0.286, 0.686, 1.0],
-        Some("brown") => [0.514, 0.325, 0.200, 1.0],
-        Some("green") => [0.369, 0.506, 0.157, 1.0],
-        Some("red") => [0.690, 0.180, 0.149, 1.0],
-        _ => [0.0, 0.0, 0.0, 1.0],
-    }
-}
-
-pub fn build_sign_texts(
-    elements: &mut Vec<MenuElement>,
-    chunk_store: &ChunkStore,
-    block_state_table: BlockStateTable,
-    camera_pos: DVec3,
-    camera_fov_deg: f32,
-    screen_height: f32,
-    gs: f32,
-    project: &dyn Fn(DVec3) -> Option<(f32, f32)>,
-) {
-    let fov = (camera_fov_deg.to_radians() * 0.5).tan();
-    for (pos, entry) in &chunk_store.block_entities {
-        if !matches!(
-            entry.kind,
-            BlockEntityKind::Sign | BlockEntityKind::HangingSign
-        ) {
-            continue;
-        }
-        let block_center = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5);
-        let dist_sq = (block_center - camera_pos).length_squared();
-        if dist_sq > 24.0 * 24.0 {
-            continue;
-        }
-        let state = chunk_store.get_block_state(pos.x, pos.y, pos.z);
-        let data = block_state_table.block_state_data(state);
-        let id = data.id();
-
-        let (is_front, normal, board_center) = if id.ends_with("_wall_sign") {
-            let facing = data.properties().get("facing").unwrap_or("north");
-            let (facing_normal, offset_center) = match facing {
-                "north" => (DVec3::new(0.0, 0.0, -1.0), DVec3::new(0.5, 0.45, 0.92)),
-                "south" => (DVec3::new(0.0, 0.0, 1.0), DVec3::new(0.5, 0.45, 0.08)),
-                "west" => (DVec3::new(-1.0, 0.0, 0.0), DVec3::new(0.92, 0.45, 0.5)),
-                "east" => (DVec3::new(1.0, 0.0, 0.0), DVec3::new(0.08, 0.45, 0.5)),
-                _ => (DVec3::new(0.0, 0.0, -1.0), DVec3::new(0.5, 0.45, 0.92)),
-            };
-            let center = DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) + offset_center;
-            let to_cam = (camera_pos - center).normalize();
-            if facing_normal.dot(to_cam) <= 0.0 {
-                continue;
-            }
-            (true, facing_normal, center)
-        } else if id.ends_with("_hanging_sign") || id.ends_with("_wall_hanging_sign") {
-            let facing = data.properties().get("facing").unwrap_or("north");
-            let facing_normal = match facing {
-                "north" => DVec3::new(0.0, 0.0, -1.0),
-                "south" => DVec3::new(0.0, 0.0, 1.0),
-                "west" => DVec3::new(-1.0, 0.0, 0.0),
-                "east" => DVec3::new(1.0, 0.0, 0.0),
-                _ => DVec3::new(0.0, 0.0, -1.0),
-            };
-            let center = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.35, pos.z as f64 + 0.5);
-            let to_cam = (camera_pos - center).normalize();
-            let dot = facing_normal.dot(to_cam);
-            if dot >= 0.0 {
-                (true, facing_normal, center)
-            } else {
-                (false, -facing_normal, center)
-            }
-        } else {
-            let rot: f64 = data
-                .properties()
-                .get("rotation")
-                .and_then(|r| r.parse().ok())
-                .unwrap_or(0.0);
-            let angle = rot * (std::f64::consts::PI / 8.0);
-            let standing_normal = DVec3::new(-angle.sin(), 0.0, angle.cos());
-            let center = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.70, pos.z as f64 + 0.5);
-            let to_cam = (camera_pos - center).normalize();
-            let dot = standing_normal.dot(to_cam);
-            if dot >= 0.0 {
-                (true, standing_normal, center)
-            } else {
-                (false, -standing_normal, center)
-            }
-        };
-
-        let face_position = board_center + normal * 0.045;
-        let delta = face_position - camera_pos;
-        let dist = delta.length() as f32;
-        if dist < 0.1 || dist > 24.0 {
-            continue;
-        }
-
-        let dir = (delta / dist as f64).as_vec3();
-        let occluded = if let Some(hit) = crate::player::interaction::raycast(
-            camera_pos,
-            dir,
-            dist,
-            chunk_store,
-            block_state_table,
-            None,
-        ) {
-            (hit.hit_point - camera_pos).length() < (dist - 0.25) as f64
-        } else {
-            false
-        };
-        if occluded {
-            continue;
-        }
-
-        let (messages, color_name) = if is_front {
-            if let Some(front) = entry.nbt.compound("front_text") {
-                let color = front
-                    .string("color")
-                    .map(|s| s.to_str().into_owned());
-                let mut lines = Vec::new();
-                if let Some(list) = front.list("messages") {
-                    if let Some(strings) = list.strings() {
-                        for s in strings {
-                            lines.push(s.to_str().into_owned());
-                        }
-                    }
-                }
-                (lines, color)
-            } else {
-                let mut lines = Vec::new();
-                for key in ["Text1", "Text2", "Text3", "Text4"] {
-                    if let Some(s) = entry.nbt.string(key) {
-                        lines.push(s.to_str().into_owned());
-                    } else {
-                        lines.push(String::new());
-                    }
-                }
-                let color = entry
-                    .nbt
-                    .string("Color")
-                    .map(|s| s.to_str().into_owned());
-                (lines, color)
-            }
-        } else {
-            if let Some(back) = entry.nbt.compound("back_text") {
-                let color = back
-                    .string("color")
-                    .map(|s| s.to_str().into_owned());
-                let mut lines = Vec::new();
-                if let Some(list) = back.list("messages") {
-                    if let Some(strings) = list.strings() {
-                        for s in strings {
-                            lines.push(s.to_str().into_owned());
-                        }
-                    }
-                }
-                (lines, color)
-            } else {
-                (Vec::new(), None)
-            }
-        };
-
-        if messages.is_empty() || messages.iter().all(|m| m.is_empty() || m == "\"\"") {
-            continue;
-        }
-
-        let default_color = sign_dye_color(color_name.as_deref());
-        let font_scale = (0.104 * screen_height / (2.0 * fov * dist)).clamp(2.5, 14.0 * gs);
-        if font_scale < 2.5 {
-            continue;
-        }
-
-        for (i, raw) in messages.iter().enumerate().take(4) {
-            let spans = parse_sign_line(raw, default_color);
-            if spans.is_empty() {
-                continue;
-            }
-            let line_y = face_position.y + (1.5 - i as f64) * 0.105;
-            let line_pos = DVec3::new(face_position.x, line_y, face_position.z);
-            let Some((screen_x, screen_y)) = project(line_pos) else {
-                continue;
-            };
-            elements.push(MenuElement::TextSpans {
-                x: screen_x,
-                y: screen_y - font_scale * 0.5,
-                spans,
-                scale: font_scale,
-                centered: true,
-            });
-        }
-    }
+    Some(SignRenderInfo {
+        pos,
+        is_wall,
+        is_hanging,
+        angle,
+        front,
+        back,
+        light,
+    })
 }
 
 #[cfg(test)]
@@ -434,16 +386,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sign_line() {
-        let spans = parse_sign_line("{\"text\":\"Leaderboard\"}", [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].text, "Leaderboard");
-
-        let spans_plain = parse_sign_line("\"Hello\"", [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(spans_plain.len(), 1);
-        assert_eq!(spans_plain[0].text, "Hello");
-
-        let spans_empty = parse_sign_line("\"\"", [0.0, 0.0, 0.0, 1.0]);
-        assert!(spans_empty.is_empty());
+    fn test_parse_component_text() {
+        assert_eq!(parse_component_text("{\"text\":\"Leaderboard\"}"), "Leaderboard");
+        assert_eq!(parse_component_text("\"Hello\""), "Hello");
+        assert_eq!(parse_component_text("\"\""), "");
     }
 }

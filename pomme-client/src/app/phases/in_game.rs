@@ -3183,16 +3183,7 @@ pub fn update_game(
             &|position| renderer.project_world_to_screen(position),
             &|spans, s| renderer.menu_spans_width(spans, s),
         );
-        crate::world::block_entity::build_sign_texts(
-            &mut elements,
-            &game.chunk_store,
-            game.block_registry.block_state_table(),
-            renderer.camera_render_position(),
-            renderer.camera_fov_degrees(),
-            sh as f32,
-            gs,
-            &|position| renderer.project_world_to_screen(position),
-        );
+
     }
 
     if let Some(switcher) = &mut game.game_mode_switcher {
@@ -4452,6 +4443,23 @@ pub fn update_game(
         Vec::new()
     };
 
+    let sign_renders: Vec<crate::world::block_entity::SignRenderInfo> = if benchmark_running {
+        Vec::new()
+    } else {
+        game.chunk_store
+            .block_entities
+            .iter()
+            .filter_map(|(pos, be)| {
+                let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                let block_state_data = game.block_registry.block_state_data(state);
+                let id = block_state_data.id();
+                let props = block_state_data.properties();
+                let light = block_lighter::light_coords(&world_light, [pos.x, pos.y, pos.z]);
+                crate::world::block_entity::parse_sign_render_info(*pos, be.kind, &be.nbt, id, props, light)
+            })
+            .collect()
+    };
+
     let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
@@ -4626,6 +4634,7 @@ pub fn update_game(
         &item_renders,
         &block_entity_renders,
         &particle_quads,
+        &sign_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off
