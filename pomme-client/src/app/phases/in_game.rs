@@ -4475,6 +4475,10 @@ pub fn update_game(
                 if !crate::world::block_entity::is_block_entity_block(id) {
                     return None;
                 }
+                if id.contains("hanging_sign") {
+                    return None;
+                }
+                let is_wall = id.ends_with("_wall_sign") || id.ends_with("_wall_hanging_sign");
                 let props = block_state_data.properties();
                 let variant = block_entity::variant_for_block(be.kind, id, props);
                 let yaw = block_entity::yaw_for_block(be.kind, props);
@@ -4508,6 +4512,7 @@ pub fn update_game(
                     kind: be.kind,
                     yaw,
                     variant,
+                    is_wall,
                     lid_open,
                     light,
                 })
