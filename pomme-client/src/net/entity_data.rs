@@ -159,6 +159,19 @@ fn send_data_value(
             };
             NetworkEvent::EntityCustomName { id, name }
         }
+        (23, Value::OptionalComponent(Some(nbt))) => {
+            let spans = match super::chat::read_component(nbt, &mut 0) {
+                Ok(component) => {
+                    let spans = crate::ui::text::format_component_spans(&component, [1.0, 1.0, 1.0, 1.0]);
+                    crate::ui::text::legacy_format_spans(&spans, true)
+                }
+                Err(e) => {
+                    tracing::debug!("Skipping unreadable text display: {e}");
+                    return;
+                }
+            };
+            NetworkEvent::TextDisplayText { id, spans }
+        }
         (18, Value::Variant(Variant::Cow, v)) => variant(EntityKind::Cow, *v),
         (18, Value::Variant(Variant::Chicken, v)) => variant(EntityKind::Chicken, *v),
         // Cat / wolf variants: 20 / 23 on 26.x, one lower on 1.21.9-1.21.11
@@ -218,6 +231,11 @@ pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
         EntityDataValue::Long(v) => Value::Long(*v),
         EntityDataValue::Float(v) => Value::Float(*v),
         EntityDataValue::Boolean(v) => Value::Bool(*v),
+        EntityDataValue::FormattedText(text) => {
+            let mut nbt = Vec::new();
+            text.azalea_write(&mut nbt).ok()?;
+            Value::OptionalComponent(Some(nbt.into()))
+        }
         EntityDataValue::OptionalFormattedText(text) => Value::OptionalComponent(match text {
             Some(text) => {
                 let mut nbt = Vec::new();

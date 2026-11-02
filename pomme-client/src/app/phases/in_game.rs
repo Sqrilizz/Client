@@ -344,6 +344,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub text_display_store: crate::entity::TextDisplayStore,
     pub particle_store: crate::particle::ParticleStore,
     pub level_runtime: crate::world::level::LevelRuntime,
     pub block_entity_anim: BlockEntityAnimStore,
@@ -515,6 +516,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            text_display_store: crate::entity::TextDisplayStore::new(),
             particle_store: {
                 let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
                 crate::particle::ParticleStore::new(
@@ -3132,6 +3134,17 @@ pub fn update_game(
                 camera_pos: renderer.camera_render_position(),
                 project: &|position| renderer.project_world_to_screen(position),
             },
+        );
+        crate::entity::text_display::build_text_displays(
+            &mut elements,
+            &game.text_display_store,
+            partial_tick,
+            gs,
+            renderer.camera_render_position(),
+            renderer.camera_fov_degrees(),
+            sh as f32,
+            &|position| renderer.project_world_to_screen(position),
+            &|spans, s| renderer.menu_spans_width(spans, s),
         );
     }
 

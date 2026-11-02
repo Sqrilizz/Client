@@ -299,21 +299,21 @@ pub(crate) fn render_head_3d(rgba: &[u8], sw: u32, sh: u32, out_size: u32) -> Op
     if sw < 32 || sh < 16 || out_size == 0 {
         return None;
     }
-    let rot_x = 30.0f32.to_radians();
-    let rot_y = 225.0f32.to_radians();
-    let (cx, sx) = (rot_x.cos(), rot_x.sin());
-    let (cy, sy) = (rot_y.cos(), rot_y.sin());
+    let sz = out_size as f32;
+    let screen = glam::Mat4::from_translation(glam::Vec3::new(sz * 0.5, sz * 0.5, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(sz, -sz, sz));
+    let disp = glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.0 / 16.0, 0.0))
+        * glam::Mat4::from_rotation_x(30.0f32.to_radians())
+        * glam::Mat4::from_rotation_y(45.0f32.to_radians());
+    let item_center = glam::Mat4::from_translation(glam::Vec3::new(-0.5, -0.5, -0.5));
+    let skull_trans = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+        * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
+        * glam::Mat4::from_rotation_y(180.0f32.to_radians());
+    let matrix = screen * disp * item_center * skull_trans;
 
     let transform = |x: f32, y: f32, z: f32| -> [f32; 3] {
-        let ty = y + 3.0 / 16.0;
-        let rx_y = cx * ty - sx * z;
-        let rx_z = sx * ty + cx * z;
-        let ry_x = cy * x + sy * rx_z;
-        let ry_z = -sy * x + cy * rx_z;
-        let sz = out_size as f32;
-        let px = sz * 0.5 + ry_x * sz;
-        let py = sz * 0.5 - rx_y * sz;
-        [px, py, ry_z]
+        let p = matrix.transform_point3(glam::Vec3::new(x, y, z));
+        [p.x, p.y, p.z]
     };
 
     let edge = |a: [f32; 3], b: [f32; 3], c: [f32; 2]| -> f32 {
@@ -334,33 +334,32 @@ pub(crate) fn render_head_3d(rgba: &[u8], sw: u32, sh: u32, out_size: u32) -> Op
                               w: f32,
                               h: f32,
                               d: f32,
-                              shades: [f32; 6]| {
-        let t0 = transform(x0, y0, z0);
-        let t1 = transform(x1, y0, z0);
-        let t2 = transform(x1, y1, z0);
-        let t3 = transform(x0, y1, z0);
-        let l0 = transform(x0, y0, z1);
-        let l1 = transform(x1, y0, z1);
-        let l2 = transform(x1, y1, z1);
-        let l3 = transform(x0, y1, z1);
-
-        let u0 = u;
-        let u1 = u + d;
-        let u2 = u + d + w;
-        let u22 = u + d + w + w;
-        let u3 = u + d + w + d;
-        let u4 = u + d + w + d + w;
-        let v0 = v;
-        let v1 = v + d;
-        let v2 = v + d + h;
-
-        let faces: [([f32; 3], [f32; 3], [f32; 3], [f32; 3], [[f32; 2]; 4], f32); 6] = [
-            (l1, l0, t0, t1, [[u2, v0], [u1, v0], [u1, v1], [u2, v1]], shades[1]),
-            (t2, t3, l3, l2, [[u22, v1], [u2, v1], [u2, v0], [u22, v0]], shades[0]),
-            (t0, l0, l3, t3, [[u1, v1], [u0, v1], [u0, v2], [u1, v2]], shades[4]),
-            (t1, t0, t3, t2, [[u2, v1], [u1, v1], [u1, v2], [u2, v2]], shades[2]),
-            (l1, t1, t2, l2, [[u3, v1], [u2, v1], [u2, v2], [u3, v2]], shades[5]),
-            (l0, l1, l2, l3, [[u4, v1], [u3, v1], [u3, v2], [u4, v2]], shades[3]),
+                              shades: [f32; 3]| {
+        let faces: [([f32; 3], [f32; 3], [f32; 3], [f32; 3], [[f32; 2]; 4], f32); 3] = [
+            (
+                transform(x0, y0, z0),
+                transform(x1, y0, z0),
+                transform(x1, y0, z1),
+                transform(x0, y0, z1),
+                [[u + d, v + d], [u + d + w, v + d], [u + d + w, v], [u + d, v]],
+                shades[0],
+            ),
+            (
+                transform(x0, y0, z0),
+                transform(x0, y1, z0),
+                transform(x1, y1, z0),
+                transform(x1, y0, z0),
+                [[u + d, v + d], [u + d, v + d + h], [u + d + w, v + d + h], [u + d + w, v + d]],
+                shades[1],
+            ),
+            (
+                transform(x0, y0, z1),
+                transform(x0, y1, z1),
+                transform(x0, y1, z0),
+                transform(x0, y0, z0),
+                [[u + d + w + d, v + d], [u + d + w + d, v + d + h], [u + d + w, v + d + h], [u + d + w, v + d]],
+                shades[2],
+            ),
         ];
 
         for (p0, p1, p2, p3, uv, shade) in faces {
@@ -434,7 +433,7 @@ pub(crate) fn render_head_3d(rgba: &[u8], sw: u32, sh: u32, out_size: u32) -> Op
         }
     };
 
-    let shades = [1.0, 0.5, 0.8, 0.5, 0.6, 0.6];
+    let shades = [1.0, 0.8, 0.6];
     rasterize_cube(-0.25, -0.5, -0.25, 0.25, 0.0, 0.25, 0.0, 0.0, 8.0, 8.0, 8.0, shades);
     let hat_off = 0.25 / 16.0;
     rasterize_cube(

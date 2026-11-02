@@ -597,6 +597,10 @@ pub enum NetworkEvent {
         id: i32,
         name: Option<String>,
     },
+    TextDisplayText {
+        id: i32,
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
     EntitySwing {
         id: i32,
     },

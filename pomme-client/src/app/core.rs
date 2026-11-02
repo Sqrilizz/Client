@@ -2629,6 +2629,9 @@ impl AppCore {
                         game.item_entity_store
                             .spawn_item(id, uuid, position, velocity);
                     }
+                    if entity_type == azalea_registry::builtin::EntityKind::TextDisplay {
+                        game.text_display_store.spawn(id, uuid, position);
+                    }
                 }
                 NetworkEvent::EntityMoved {
                     id,
@@ -2640,6 +2643,7 @@ impl AppCore {
                     game.entity_store
                         .move_living_delta(id, dx, dy, dz, on_ground);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                    game.text_display_store.move_delta(id, dx, dy, dz);
                     if let Some(pos) = game.entity_positions.get_mut(&id) {
                         *pos += dvec3(dx, dy, dz);
                         self.audio.update_entity_sound_position(id, *pos);
@@ -2659,6 +2663,7 @@ impl AppCore {
                     game.entity_store
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                    game.text_display_store.move_delta(id, dx, dy, dz);
                     if let Some(pos) = game.entity_positions.get_mut(&id) {
                         *pos += dvec3(dx, dy, dz);
                         self.audio.update_entity_sound_position(id, *pos);
@@ -2703,6 +2708,7 @@ impl AppCore {
                     }
                     game.item_entity_store
                         .teleport(id, position, velocity, on_ground);
+                    game.text_display_store.teleport(id, position);
                     game.entity_positions.insert(id, position);
                     self.audio.update_entity_sound_position(id, position);
                 }
@@ -2761,6 +2767,7 @@ impl AppCore {
                         self.audio.stop_entity_sounds(*id);
                     }
                     game.item_entity_store.remove(&ids);
+                    game.text_display_store.remove(&ids);
                     if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
                         game.controlled_vehicle_id = None;
                     }
@@ -2810,6 +2817,10 @@ impl AppCore {
                         }
                     }
                     game.entity_store.apply_entity_data(id, index, value);
+                    game.text_display_store.apply_entity_data(id, index, value);
+                }
+                NetworkEvent::TextDisplayText { id, spans } => {
+                    game.text_display_store.set_text(id, spans);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
@@ -3092,6 +3103,7 @@ impl AppCore {
                     self.audio.stop_all_sounds();
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
+                    game.text_display_store = crate::entity::TextDisplayStore::new();
                     game.entity_positions.clear();
                     game.silent_entities.clear();
                     game.action_bar = None;

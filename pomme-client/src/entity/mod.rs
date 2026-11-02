@@ -3,7 +3,10 @@ pub mod dimensions;
 pub mod glowing;
 pub mod light;
 pub mod shadow;
+pub mod text_display;
 pub mod villager;
+
+pub use text_display::TextDisplayStore;
 
 use std::collections::HashMap;
 

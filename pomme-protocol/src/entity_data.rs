@@ -26,6 +26,7 @@ pub enum Serializer {
     Long,
     Float,
     Bool,
+    Component,
     OptionalComponent,
     ItemStack,
     OptionalBlockPos,
@@ -87,7 +88,7 @@ macro_rules! serializers_26_2 {
     S::Float,
     // STRING_UTF8
     S::Skip(Utf(MAX_STRING_LENGTH)),
-    S::Skip(TEXT),
+    S::Component,
     S::OptionalComponent,
     S::ItemStack,
     S::Bool,
@@ -193,6 +194,11 @@ impl ItemCodec {
             S::Long => Value::Long(r.varlong()? as i64),
             S::Float => Value::Float(r.f32()?),
             S::Bool => Value::Bool(r.bool()?),
+            S::Component => Value::OptionalComponent(Some({
+                let start = r.pos();
+                self.skip(r, &TEXT)?;
+                r.since(start).into()
+            })),
             S::OptionalComponent => Value::OptionalComponent(r.optional(|r| {
                 let start = r.pos();
                 self.skip(r, &TEXT)?;
