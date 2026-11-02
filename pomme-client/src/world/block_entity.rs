@@ -289,15 +289,26 @@ pub fn code_color_rgb(code: char) -> Option<u32> {
 
 fn extract_json_text(v: &serde_json::Value, out: &mut String) {
     match v {
-        serde_json::Value::String(s) => out.push_str(s),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            {
+                if let Ok(nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    extract_json_text(&nested, out);
+                    return;
+                }
+            }
+            out.push_str(s);
+        }
         serde_json::Value::Array(arr) => {
             for item in arr {
                 extract_json_text(item, out);
             }
         }
         serde_json::Value::Object(map) => {
-            if let Some(t) = map.get("text").and_then(|v| v.as_str()) {
-                out.push_str(t);
+            if let Some(t) = map.get("text") {
+                extract_json_text(t, out);
             }
             if let Some(extra) = map.get("extra") {
                 extract_json_text(extra, out);
@@ -309,12 +320,23 @@ fn extract_json_text(v: &serde_json::Value, out: &mut String) {
 
 fn extract_json_color(v: &serde_json::Value) -> Option<u32> {
     match v {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            {
+                if let Ok(nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    return extract_json_color(&nested);
+                }
+            }
+            None
+        }
         serde_json::Value::Object(map) => {
             if let Some(c) = map.get("color").and_then(|v| v.as_str()) {
                 if let Some(rgb) = dye_color_rgb(c).or_else(|| named_color_rgb(c)) {
                     return Some(rgb);
                 }
-                if let Some(hex) = c.strip_prefix("#") {
+                if let Some(hex) = c.strip_prefix('#') {
                     if let Ok(rgb) = u32::from_str_radix(hex, 16) {
                         return Some(rgb);
                     }
@@ -359,21 +381,47 @@ fn extract_first_code_color(text: &str) -> (String, Option<u32>) {
 }
 
 pub fn parse_line(raw: &str) -> SignLineData {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "\"\"" {
+    let mut current = raw.trim().to_string();
+    if current.is_empty() || current == "\"\"" || current == "null" {
         return SignLineData::default();
     }
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        let mut text = String::new();
-        extract_json_text(&val, &mut text);
-        let color_rgb = extract_json_color(&val);
-        let (clean_text, code_color) = extract_first_code_color(&text);
-        return SignLineData {
-            text: clean_text,
-            color_rgb: color_rgb.or(code_color),
-        };
+    for _ in 0..5 {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&current) {
+            match val {
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                    let mut text = String::new();
+                    extract_json_text(&val, &mut text);
+                    let color_rgb = extract_json_color(&val);
+                    let (clean_text, code_color) = extract_first_code_color(&text);
+                    return SignLineData {
+                        text: clean_text,
+                        color_rgb: color_rgb.or(code_color),
+                    };
+                }
+                serde_json::Value::String(s) => {
+                    let s_trimmed = s.trim();
+                    if (s_trimmed.starts_with('{') && s_trimmed.ends_with('}'))
+                        || (s_trimmed.starts_with('[') && s_trimmed.ends_with(']'))
+                    {
+                        current = s_trimmed.to_string();
+                        continue;
+                    }
+                    let (clean_text, code_color) = extract_first_code_color(&s);
+                    return SignLineData {
+                        text: clean_text,
+                        color_rgb: code_color,
+                    };
+                }
+                _ => break,
+            }
+        } else {
+            break;
+        }
     }
-    let s = if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+    let trimmed = current.trim();
+    let s = if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
         &trimmed[1..trimmed.len() - 1]
     } else {
         trimmed
@@ -445,9 +493,18 @@ pub fn parse_sign_render_info(
                     }
                 } else if let Some(compounds) = list.compounds() {
                     for (i, c) in compounds.into_iter().enumerate().take(4) {
-                        if let Some(text) = c.string("text") {
-                            messages[i] = parse_line(&text.to_str());
+                        let mut text = String::new();
+                        if let Some(s) = c.string("text") {
+                            text.push_str(&s.to_str());
                         }
+                        if let Some(extra) = c.list("extra") {
+                            if let Some(extra_strings) = extra.strings() {
+                                for es in extra_strings.iter() {
+                                    text.push_str(&es.to_str());
+                                }
+                            }
+                        }
+                        messages[i] = parse_line(&text);
                     }
                 }
             }
@@ -521,5 +578,7 @@ mod tests {
         assert_eq!(parse_component_text("\"Hello\""), "Hello");
         assert_eq!(parse_component_text("\"\""), "");
         assert_eq!(parse_component_text("[\"\",{\"text\":\"лидеров\",\"color\":\"gold\"}]"), "лидеров");
+        assert_eq!(parse_component_text(r#""[\"\",{\"text\":\"лидеров\",\"color\":\"gold\"}]""#), "лидеров");
+        assert_eq!(parse_component_text(r#"{"text":"","extra":[{"text":"Топ "},{"text":"лидеров"}]}"#), "Топ лидеров");
     }
 }

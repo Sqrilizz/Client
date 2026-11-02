@@ -4475,7 +4475,7 @@ pub fn update_game(
                 if !crate::world::block_entity::is_block_entity_block(id) {
                     return None;
                 }
-                if id.contains("hanging_sign") {
+                if id.contains("sign") {
                     return None;
                 }
                 let is_wall = id.ends_with("_wall_sign") || id.ends_with("_wall_hanging_sign");
