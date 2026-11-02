@@ -295,6 +295,166 @@ pub(crate) fn extract_face_8x8_with_hat(
     Some(out)
 }
 
+pub(crate) fn render_head_3d(rgba: &[u8], sw: u32, sh: u32, out_size: u32) -> Option<Vec<u8>> {
+    if sw < 32 || sh < 16 || out_size == 0 {
+        return None;
+    }
+    let rot_x = 30.0f32.to_radians();
+    let rot_y = 225.0f32.to_radians();
+    let (cx, sx) = (rot_x.cos(), rot_x.sin());
+    let (cy, sy) = (rot_y.cos(), rot_y.sin());
+
+    let transform = |x: f32, y: f32, z: f32| -> [f32; 3] {
+        let ty = y + 3.0 / 16.0;
+        let rx_y = cx * ty - sx * z;
+        let rx_z = sx * ty + cx * z;
+        let ry_x = cy * x + sy * rx_z;
+        let ry_z = -sy * x + cy * rx_z;
+        let sz = out_size as f32;
+        let px = sz * 0.5 + ry_x * sz;
+        let py = sz * 0.5 - rx_y * sz;
+        [px, py, ry_z]
+    };
+
+    let edge = |a: [f32; 3], b: [f32; 3], c: [f32; 2]| -> f32 {
+        (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])
+    };
+
+    let mut pixels = vec![0u8; (out_size * out_size * 4) as usize];
+    let mut z_buf = vec![f32::NEG_INFINITY; (out_size * out_size) as usize];
+
+    let mut rasterize_cube = |x0: f32,
+                              y0: f32,
+                              z0: f32,
+                              x1: f32,
+                              y1: f32,
+                              z1: f32,
+                              u: f32,
+                              v: f32,
+                              w: f32,
+                              h: f32,
+                              d: f32,
+                              shades: [f32; 6]| {
+        let t0 = transform(x0, y0, z0);
+        let t1 = transform(x1, y0, z0);
+        let t2 = transform(x1, y1, z0);
+        let t3 = transform(x0, y1, z0);
+        let l0 = transform(x0, y0, z1);
+        let l1 = transform(x1, y0, z1);
+        let l2 = transform(x1, y1, z1);
+        let l3 = transform(x0, y1, z1);
+
+        let u0 = u;
+        let u1 = u + d;
+        let u2 = u + d + w;
+        let u22 = u + d + w + w;
+        let u3 = u + d + w + d;
+        let u4 = u + d + w + d + w;
+        let v0 = v;
+        let v1 = v + d;
+        let v2 = v + d + h;
+
+        let faces: [([f32; 3], [f32; 3], [f32; 3], [f32; 3], [[f32; 2]; 4], f32); 6] = [
+            (l1, l0, t0, t1, [[u2, v0], [u1, v0], [u1, v1], [u2, v1]], shades[1]),
+            (t2, t3, l3, l2, [[u22, v1], [u2, v1], [u2, v0], [u22, v0]], shades[0]),
+            (t0, l0, l3, t3, [[u1, v1], [u0, v1], [u0, v2], [u1, v2]], shades[4]),
+            (t1, t0, t3, t2, [[u2, v1], [u1, v1], [u1, v2], [u2, v2]], shades[2]),
+            (l1, t1, t2, l2, [[u3, v1], [u2, v1], [u2, v2], [u3, v2]], shades[5]),
+            (l0, l1, l2, l3, [[u4, v1], [u3, v1], [u3, v2], [u4, v2]], shades[3]),
+        ];
+
+        for (p0, p1, p2, p3, uv, shade) in faces {
+            let triangles = [
+                (p0, p1, p2, uv[0], uv[1], uv[2]),
+                (p2, p3, p0, uv[2], uv[3], uv[0]),
+            ];
+            for (v0, v1, v2, uv0, uv1, uv2) in triangles {
+                let area = edge(v0, v1, [v2[0], v2[1]]);
+                if area <= 0.0 {
+                    continue;
+                }
+                let min_x = (v0[0].min(v1[0]).min(v2[0]).floor() as i32).clamp(0, out_size as i32 - 1) as u32;
+                let max_x = (v0[0].max(v1[0]).max(v2[0]).ceil() as i32).clamp(0, out_size as i32 - 1) as u32;
+                let min_y = (v0[1].min(v1[1]).min(v2[1]).floor() as i32).clamp(0, out_size as i32 - 1) as u32;
+                let max_y = (v0[1].max(v1[1]).max(v2[1]).ceil() as i32).clamp(0, out_size as i32 - 1) as u32;
+
+                for py in min_y..=max_y {
+                    for px in min_x..=max_x {
+                        let p = [px as f32 + 0.5, py as f32 + 0.5];
+                        let w0 = edge(v1, v2, p);
+                        let w1 = edge(v2, v0, p);
+                        let w2 = edge(v0, v1, p);
+                        if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                            let b0 = w0 / area;
+                            let b1 = w1 / area;
+                            let b2 = w2 / area;
+                            let depth = b0 * v0[2] + b1 * v1[2] + b2 * v2[2];
+                            let tu = b0 * uv0[0] + b1 * uv1[0] + b2 * uv2[0];
+                            let tv = b0 * uv0[1] + b1 * uv1[1] + b2 * uv2[1];
+                            let sx = (tu.floor() as u32).min(sw - 1);
+                            let sy = (tv.floor() as u32).min(sh - 1);
+                            let src_idx = ((sy * sw + sx) * 4) as usize;
+                            if src_idx + 3 >= rgba.len() {
+                                continue;
+                            }
+                            let a = rgba[src_idx + 3];
+                            if a == 0 {
+                                continue;
+                            }
+                            let idx = (py * out_size + px) as usize;
+                            if depth > z_buf[idx] {
+                                let dst_idx = idx * 4;
+                                let fr = ((rgba[src_idx] as f32 * shade).round() as u32).min(255) as u8;
+                                let fg = ((rgba[src_idx + 1] as f32 * shade).round() as u32).min(255) as u8;
+                                let fb = ((rgba[src_idx + 2] as f32 * shade).round() as u32).min(255) as u8;
+                                if a == 255 {
+                                    pixels[dst_idx] = fr;
+                                    pixels[dst_idx + 1] = fg;
+                                    pixels[dst_idx + 2] = fb;
+                                    pixels[dst_idx + 3] = 255;
+                                    z_buf[idx] = depth;
+                                } else {
+                                    let alpha = a as f32 / 255.0;
+                                    let inv_alpha = 1.0 - alpha;
+                                    let bg_r = pixels[dst_idx] as f32;
+                                    let bg_g = pixels[dst_idx + 1] as f32;
+                                    let bg_b = pixels[dst_idx + 2] as f32;
+                                    let bg_a = pixels[dst_idx + 3];
+                                    pixels[dst_idx] = (fr as f32 * alpha + bg_r * inv_alpha).round() as u8;
+                                    pixels[dst_idx + 1] = (fg as f32 * alpha + bg_g * inv_alpha).round() as u8;
+                                    pixels[dst_idx + 2] = (fb as f32 * alpha + bg_b * inv_alpha).round() as u8;
+                                    pixels[dst_idx + 3] = bg_a.max(a);
+                                    z_buf[idx] = depth;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let shades = [1.0, 0.5, 0.8, 0.5, 0.6, 0.6];
+    rasterize_cube(-0.25, -0.5, -0.25, 0.25, 0.0, 0.25, 0.0, 0.0, 8.0, 8.0, 8.0, shades);
+    let hat_off = 0.25 / 16.0;
+    rasterize_cube(
+        -0.25 - hat_off,
+        -0.5 - hat_off,
+        -0.25 - hat_off,
+        0.25 + hat_off,
+        0.0 + hat_off,
+        0.25 + hat_off,
+        32.0,
+        0.0,
+        8.0,
+        8.0,
+        8.0,
+        shades,
+    );
+
+    Some(pixels)
+}
+
 /// RGBA8 pixels and their size.
 struct AtlasImage {
     pixels: Vec<u8>,
@@ -806,6 +966,60 @@ impl MenuGeometry {
                         *size,
                         *tint,
                     );
+                }
+                MenuElement::SkinHead3D {
+                    x,
+                    y,
+                    size,
+                    uuid,
+                    tint,
+                } => {
+                    let key = format!("head3d:{uuid}");
+                    if let Some([u0, v0, u1, v1]) = self.favicon_regions.get(&key) {
+                        push_quad(
+                            &mut vertices,
+                            *x,
+                            *y,
+                            *size,
+                            *size,
+                            *u0,
+                            *v0,
+                            *u1,
+                            *v1,
+                            *tint,
+                            6.0,
+                            [*size, *size],
+                            0.0,
+                        );
+                    } else if let Some(uv) = item_atlas_uvs.get("player_head") {
+                        push_quad(
+                            &mut vertices,
+                            *x,
+                            *y,
+                            *size,
+                            *size,
+                            uv[0],
+                            uv[1],
+                            uv[2],
+                            uv[3],
+                            *tint,
+                            3.0,
+                            [0.0, 0.0],
+                            0.0,
+                        );
+                    } else {
+                        push_atlas_image(
+                            &mut vertices,
+                            &self.favicon_regions,
+                            &self.sprite_atlas,
+                            uuid,
+                            SpriteId::SteveHead,
+                            *x,
+                            *y,
+                            *size,
+                            *tint,
+                        );
+                    }
                 }
                 MenuElement::Vignette { w, h, brightness } => {
                     // Clamp mirrors vanilla Hud.extractVignette.
@@ -2162,6 +2376,13 @@ pub enum MenuElement {
     /// A player's 8x8 skin face, looked up in the shared face/favicon atlas by
     /// UUID; falls back to the default `SteveHead` sprite until it loads.
     SkinFace {
+        x: f32,
+        y: f32,
+        size: f32,
+        uuid: String,
+        tint: [f32; 4],
+    },
+    SkinHead3D {
         x: f32,
         y: f32,
         size: f32,
@@ -5251,5 +5472,15 @@ mod tests {
         for px in out.pixels().filter(|px| px[3] > 0) {
             assert_eq!([px[0], px[1], px[2]], [255, 255, 255], "alpha {}", px[3]);
         }
+    }
+
+    #[test]
+    fn render_head_3d_rasterizes_skin_into_buffer() {
+        let rgba = vec![255u8; 64 * 64 * 4];
+        let head = render_head_3d(&rgba, 64, 64, 32);
+        assert!(head.is_some());
+        let pixels = head.unwrap();
+        assert_eq!(pixels.len(), 32 * 32 * 4);
+        assert!(pixels.chunks_exact(4).any(|p| p[3] == 255));
     }
 }

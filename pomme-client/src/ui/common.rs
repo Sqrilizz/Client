@@ -567,7 +567,7 @@ pub(crate) fn push_item_icon_with_owner(
         && let Some(profile) = data.get_component::<Profile>()
     {
         let (_, _, _, key) = profile_head_info(&profile);
-        elements.push(MenuElement::SkinFace {
+        elements.push(MenuElement::SkinHead3D {
             x,
             y,
             size,
