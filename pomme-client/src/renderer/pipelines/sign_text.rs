@@ -16,13 +16,16 @@ pub struct SignTextVertex {
     pub position: [f32; 3],
     pub uv: [f32; 2],
     pub layer: f32,
+    pub tex: f32,
     pub color: [f32; 4],
     pub light: f32,
 }
 
 impl SignTextVertex {
-    pub const BUFFER: rhi::VertexBufferLayout<'static> =
-        rhi::vertex_buffer!(Self, [Float32x3, Float32x2, Float32, Float32x4, Float32]);
+    pub const BUFFER: rhi::VertexBufferLayout<'static> = rhi::vertex_buffer!(
+        Self,
+        [Float32x3, Float32x2, Float32, Float32, Float32x4, Float32]
+    );
 }
 
 fn get_dark_color(color_rgb: u32, glowing: bool) -> [f32; 4] {
@@ -62,10 +65,18 @@ impl SignTextPipeline {
         targets: rhi::backend::PipelineTargets,
         lightmap: &Lightmap,
         font_texture: rhi::backend::TextureHandle,
+        font_color_texture: rhi::backend::TextureHandle,
         font_sampler: rhi::backend::Sampler,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
-        let font_layout = rhi::backend::create_bind_group_layout(device, util::FRAGMENT_TEXTURE);
+        let font_layout = rhi::backend::create_bind_group_layout(
+            device,
+            &[
+                rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
+                rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
+                rhi::BindGroupLayoutEntry::sampler(rhi::ShaderStages::FRAGMENT),
+            ],
+        );
         let pipeline_layout = rhi::backend::create_pipeline_layout(
             device,
             &[camera_layout, font_layout, lightmap.layout],
@@ -81,7 +92,17 @@ impl SignTextPipeline {
             "sign_text_camera",
         );
 
-        let font_set = util::create_texture_group(device, font_layout, font_texture, font_sampler);
+        let font_set = device.create_bind_group(
+            font_layout,
+            &[
+                (0, rhi::backend::BindingResource::Texture(font_texture)),
+                (
+                    1,
+                    rhi::backend::BindingResource::Texture(font_color_texture),
+                ),
+                (2, rhi::backend::BindingResource::Sampler(font_sampler)),
+            ],
+        );
 
         let vertex_buffers = util::create_per_frame_host_buffers(
             device,
@@ -108,11 +129,22 @@ impl SignTextPipeline {
         &mut self,
         device: &rhi::backend::Device,
         font_texture: rhi::backend::TextureHandle,
+        font_color_texture: rhi::backend::TextureHandle,
         font_sampler: rhi::backend::Sampler,
     ) {
         self.font_sampler = font_sampler;
-        self.font_set =
-            util::create_texture_group(device, self.font_layout, font_texture, font_sampler);
+        self.font_set.replace(
+            device,
+            self.font_layout,
+            &[
+                (0, rhi::backend::BindingResource::Texture(font_texture)),
+                (
+                    1,
+                    rhi::backend::BindingResource::Texture(font_color_texture),
+                ),
+                (2, rhi::backend::BindingResource::Sampler(font_sampler)),
+            ],
+        );
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -257,6 +289,7 @@ impl SignTextPipeline {
                                 let v1 = (gi.atlas_y + gi.pixel_h) as f32 * inv_atlas;
 
                                 let layer = gi.atlas_layer as f32;
+                                let tex = if gi.colored { 1.0 } else { 0.0 };
 
                                 let p0 = m.transform_point3(Vec3::new(sx, sy, z));
                                 let p1 = m.transform_point3(Vec3::new(sx + w, sy, z));
@@ -267,6 +300,7 @@ impl SignTextPipeline {
                                     position: p0.into(),
                                     uv: [u0, v0],
                                     layer,
+                                    tex,
                                     color,
                                     light: light_val,
                                 };
@@ -274,6 +308,7 @@ impl SignTextPipeline {
                                     position: p1.into(),
                                     uv: [u1, v0],
                                     layer,
+                                    tex,
                                     color,
                                     light: light_val,
                                 };
@@ -281,6 +316,7 @@ impl SignTextPipeline {
                                     position: p2.into(),
                                     uv: [u1, v1],
                                     layer,
+                                    tex,
                                     color,
                                     light: light_val,
                                 };
@@ -288,6 +324,7 @@ impl SignTextPipeline {
                                     position: p3.into(),
                                     uv: [u0, v1],
                                     layer,
+                                    tex,
                                     color,
                                     light: light_val,
                                 };

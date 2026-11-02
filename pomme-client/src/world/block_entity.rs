@@ -495,7 +495,7 @@ pub fn parse_sign_render_info(
             * 22.5
     };
 
-    let parse_side = |tag: Option<&NbtCompound>| -> SignSideData {
+    let parse_side_and_log = |tag: Option<&NbtCompound>| -> SignSideData {
         let mut messages = [
             SignLineData::default(),
             SignLineData::default(),
@@ -516,7 +516,13 @@ pub fn parse_sign_render_info(
             if let Some(list) = t.list("messages") {
                 if let Some(strings) = list.strings() {
                     for (i, s) in strings.iter().enumerate().take(4) {
-                        messages[i] = parse_line(&s.to_str());
+                        let raw = s.to_str();
+                        messages[i] = parse_line(&raw);
+                        if messages[i].text.is_empty() && !raw.trim().is_empty() {
+                            tracing::debug!(
+                                "sign line {i} parsed to empty text from raw {raw:?}"
+                            );
+                        }
                     }
                 } else if let Some(compounds) = list.compounds() {
                     for (i, c) in compounds.into_iter().enumerate().take(4) {
@@ -526,6 +532,9 @@ pub fn parse_sign_render_info(
                         let mut parsed = parse_line(&text);
                         if parsed.color_rgb.is_none() {
                             parsed.color_rgb = color;
+                        }
+                        if parsed.text.is_empty() && !text.trim().is_empty() {
+                            tracing::debug!("sign compound line {i} parsed to empty from {text:?}");
                         }
                         messages[i] = parsed;
                     }
@@ -541,7 +550,7 @@ pub fn parse_sign_render_info(
 
     let (front, back) = if let Some(front_compound) = nbt.compound("front_text") {
         let back_compound = nbt.compound("back_text");
-        (parse_side(Some(front_compound)), parse_side(back_compound))
+        (parse_side_and_log(Some(front_compound)), parse_side_and_log(back_compound))
     } else {
         let mut messages = [
             SignLineData::default(),

@@ -1905,6 +1905,10 @@ impl MenuOverlayPipeline {
         self.mc_font.texture.handle()
     }
 
+    pub fn mc_font_color_texture(&self) -> rhi::backend::TextureHandle {
+        self.mc_font_color.texture.handle()
+    }
+
     pub fn mc_font_sampler(&self) -> rhi::backend::Sampler {
         self.mc_font.sampler
     }

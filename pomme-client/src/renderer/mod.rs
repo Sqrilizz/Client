@@ -434,6 +434,7 @@ impl Renderer {
             swapchain_state.targets(),
             &lightmap,
             menu_pipeline.mc_font_texture(),
+            menu_pipeline.mc_font_color_texture(),
             menu_pipeline.mc_font_sampler(),
         );
 
@@ -1624,6 +1625,7 @@ impl Renderer {
             self.sign_text_pipeline.rebind_font(
                 &self.ctx.device,
                 self.menu_pipeline.mc_font_texture(),
+                self.menu_pipeline.mc_font_color_texture(),
                 self.menu_pipeline.mc_font_sampler(),
             );
         }
