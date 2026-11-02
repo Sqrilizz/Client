@@ -1484,6 +1484,19 @@ impl AppCore {
                     }
                 }
             }
+            for (profile, entry) in &self.player_heads {
+                if let HeadState::Ready { hat, .. } = &entry.state {
+                    if let Some(id) = profile.id {
+                        entries.push((id.to_string(), hat.clone(), 8));
+                    }
+                    if let Some(textures) = &profile.textures {
+                        entries.push((format!("textures:{textures}"), hat.clone(), 8));
+                    }
+                    if let Some(name) = &profile.name {
+                        entries.push((name.clone(), hat.clone(), 8));
+                    }
+                }
+            }
             if !entries.is_empty() {
                 renderer.update_face_atlas(&entries);
             }
@@ -1554,8 +1567,19 @@ impl AppCore {
     }
 
     /// Starts the one fetch a profile needs; its hat and base glyphs share it.
+    pub fn request_head_profile(
+        &mut self,
+        id: Option<uuid::Uuid>,
+        name: Option<String>,
+        textures: Option<String>,
+    ) {
+        let profile = HeadProfile { id, name, textures };
+        self.request_head(profile);
+    }
+
     fn request_head(&mut self, profile: HeadProfile) {
-        if self.player_heads.contains_key(&profile) {
+        if let Some(entry) = self.player_heads.get_mut(&profile) {
+            entry.last_used = Instant::now();
             return;
         }
         // A `Static` profile with no textures has nothing to fetch: vanilla's
