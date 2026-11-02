@@ -192,15 +192,21 @@ pub fn is_fluid_block(name: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SignLineData {
+    pub text: String,
+    pub color_rgb: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SignSideData {
-    pub messages: [String; 4],
+    pub messages: [SignLineData; 4],
     pub color_rgb: u32,
     pub glowing: bool,
 }
 
 impl SignSideData {
     pub fn is_empty(&self) -> bool {
-        self.messages.iter().all(String::is_empty)
+        self.messages.iter().all(|l| l.text.is_empty())
     }
 }
 
@@ -237,37 +243,150 @@ pub fn dye_color_rgb(name: &str) -> Option<u32> {
     }
 }
 
-pub fn parse_component_text(raw: &str) -> String {
-    if raw.is_empty() || raw == "\"\"" {
-        return String::new();
+pub fn named_color_rgb(name: &str) -> Option<u32> {
+    match name {
+        "black" => Some(0x000000),
+        "dark_blue" => Some(0x0000AA),
+        "dark_green" => Some(0x00AA00),
+        "dark_aqua" => Some(0x00AAAA),
+        "dark_red" => Some(0xAA0000),
+        "dark_purple" => Some(0xAA00AA),
+        "gold" => Some(0xFFAA00),
+        "gray" => Some(0xAAAAAA),
+        "dark_gray" => Some(0x555555),
+        "blue" => Some(0x5555FF),
+        "green" => Some(0x55FF55),
+        "aqua" => Some(0x55FFFF),
+        "red" => Some(0xFF5555),
+        "light_purple" => Some(0xFF55FF),
+        "yellow" => Some(0xFFFF55),
+        "white" => Some(0xFFFFFF),
+        _ => None,
     }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-        match value {
-            serde_json::Value::String(s) => return s,
-            serde_json::Value::Object(map) => {
-                let mut out = String::new();
-                if let Some(serde_json::Value::String(t)) = map.get("text") {
-                    out.push_str(t);
+}
+
+pub fn code_color_rgb(code: char) -> Option<u32> {
+    match code.to_ascii_lowercase() {
+        '0' => Some(0x000000),
+        '1' => Some(0x0000AA),
+        '2' => Some(0x00AA00),
+        '3' => Some(0x00AAAA),
+        '4' => Some(0xAA0000),
+        '5' => Some(0xAA00AA),
+        '6' => Some(0xFFAA00),
+        '7' => Some(0xAAAAAA),
+        '8' => Some(0x555555),
+        '9' => Some(0x5555FF),
+        'a' => Some(0x55FF55),
+        'b' => Some(0x55FFFF),
+        'c' => Some(0xFF5555),
+        'd' => Some(0xFF55FF),
+        'e' => Some(0xFFFF55),
+        'f' => Some(0xFFFFFF),
+        _ => None,
+    }
+}
+
+fn extract_json_text(v: &serde_json::Value, out: &mut String) {
+    match v {
+        serde_json::Value::String(s) => out.push_str(s),
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                extract_json_text(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(t) = map.get("text").and_then(|v| v.as_str()) {
+                out.push_str(t);
+            }
+            if let Some(extra) = map.get("extra") {
+                extract_json_text(extra, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_json_color(v: &serde_json::Value) -> Option<u32> {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(c) = map.get("color").and_then(|v| v.as_str()) {
+                if let Some(rgb) = dye_color_rgb(c).or_else(|| named_color_rgb(c)) {
+                    return Some(rgb);
                 }
-                if let Some(serde_json::Value::Array(extra)) = map.get("extra") {
-                    for item in extra {
-                        if let Some(t) = item.as_str() {
-                            out.push_str(t);
-                        } else if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                            out.push_str(t);
-                        }
+                if let Some(hex) = c.strip_prefix("#") {
+                    if let Ok(rgb) = u32::from_str_radix(hex, 16) {
+                        return Some(rgb);
                     }
                 }
-                return out;
             }
-            _ => {}
+            if let Some(extra) = map.get("extra") {
+                if let Some(rgb) = extract_json_color(extra) {
+                    return Some(rgb);
+                }
+            }
+            None
         }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(rgb) = extract_json_color(item) {
+                    return Some(rgb);
+                }
+            }
+            None
+        }
+        _ => None,
     }
-    if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
-        raw[1..raw.len() - 1].to_string()
+}
+
+fn extract_first_code_color(text: &str) -> (String, Option<u32>) {
+    let mut out = String::with_capacity(text.len());
+    let mut color = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '§' {
+            if let Some(&code) = chars.peek() {
+                chars.next();
+                if color.is_none() {
+                    color = code_color_rgb(code);
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    (out, color)
+}
+
+pub fn parse_line(raw: &str) -> SignLineData {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "\"\"" {
+        return SignLineData::default();
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let mut text = String::new();
+        extract_json_text(&val, &mut text);
+        let color_rgb = extract_json_color(&val);
+        let (clean_text, code_color) = extract_first_code_color(&text);
+        return SignLineData {
+            text: clean_text,
+            color_rgb: color_rgb.or(code_color),
+        };
+    }
+    let s = if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
     } else {
-        raw.to_string()
+        trimmed
+    };
+    let (clean_text, code_color) = extract_first_code_color(s);
+    SignLineData {
+        text: clean_text,
+        color_rgb: code_color,
     }
+}
+
+pub fn parse_component_text(raw: &str) -> String {
+    parse_line(raw).text
 }
 
 pub fn parse_sign_render_info(
@@ -301,7 +420,12 @@ pub fn parse_sign_render_info(
     };
 
     let parse_side = |tag: Option<&NbtCompound>| -> SignSideData {
-        let mut messages = [String::new(), String::new(), String::new(), String::new()];
+        let mut messages = [
+            SignLineData::default(),
+            SignLineData::default(),
+            SignLineData::default(),
+            SignLineData::default(),
+        ];
         let mut color_rgb = 0u32;
         let mut glowing = false;
         if let Some(t) = tag {
@@ -316,12 +440,12 @@ pub fn parse_sign_render_info(
             if let Some(list) = t.list("messages") {
                 if let Some(strings) = list.strings() {
                     for (i, s) in strings.iter().enumerate().take(4) {
-                        messages[i] = parse_component_text(&s.to_str());
+                        messages[i] = parse_line(&s.to_str());
                     }
                 } else if let Some(compounds) = list.compounds() {
                     for (i, c) in compounds.into_iter().enumerate().take(4) {
                         if let Some(text) = c.string("text") {
-                            messages[i] = text.to_str().into_owned();
+                            messages[i] = parse_line(&text.to_str());
                         }
                     }
                 }
@@ -338,10 +462,15 @@ pub fn parse_sign_render_info(
         let back_compound = nbt.compound("back_text");
         (parse_side(Some(front_compound)), parse_side(back_compound))
     } else {
-        let mut messages = [String::new(), String::new(), String::new(), String::new()];
+        let mut messages = [
+            SignLineData::default(),
+            SignLineData::default(),
+            SignLineData::default(),
+            SignLineData::default(),
+        ];
         for (i, key) in ["Text1", "Text2", "Text3", "Text4"].iter().enumerate() {
             if let Some(s) = nbt.string(key) {
-                messages[i] = parse_component_text(&s.to_str());
+                messages[i] = parse_line(&s.to_str());
             }
         }
         let color_rgb = nbt
@@ -390,5 +519,6 @@ mod tests {
         assert_eq!(parse_component_text("{\"text\":\"Leaderboard\"}"), "Leaderboard");
         assert_eq!(parse_component_text("\"Hello\""), "Hello");
         assert_eq!(parse_component_text("\"\""), "");
+        assert_eq!(parse_component_text("[\"\",{\"text\":\"лидеров\",\"color\":\"gold\"}]"), "лидеров");
     }
 }

@@ -208,46 +208,44 @@ impl SignTextPipeline {
                 }
 
                 let near = dist_sq < 256.0;
-                let dark_color = get_dark_color(side.color_rgb, side.glowing);
-                let (text_color, outline_color, light_val) = if side.glowing {
-                    let c = rgb_to_vec4(side.color_rgb);
-                    let outline = if side.color_rgb == 0 || near {
-                        Some(dark_color)
-                    } else {
-                        None
-                    };
-                    (
-                        c,
-                        outline,
-                        crate::renderer::chunk::block_lighter::LightLevels::FULL_BRIGHT.lane(),
-                    )
-                } else {
-                    (dark_color, None, sign.light.lane())
-                };
+                let default_dark = get_dark_color(side.color_rgb, side.glowing);
 
-                for (line_idx, text) in side.messages.iter().enumerate() {
-                    if text.is_empty() {
+                for (line_idx, line) in side.messages.iter().enumerate() {
+                    if line.text.is_empty() {
                         continue;
                     }
 
-                    let mut line_chars = Vec::new();
-                    let mut line_w = 0.0f32;
-                    for ch in text.chars() {
-                        let adv = glyph_map.glyph(ch, None).advance;
-                        if line_w + adv > max_width && !line_chars.is_empty() {
-                            break;
-                        }
-                        line_w += adv;
-                        line_chars.push(ch);
-                    }
+                    let effective_rgb = line.color_rgb.unwrap_or(side.color_rgb);
+                    let (text_color, outline_color, light_val) = if side.glowing {
+                        let c = rgb_to_vec4(effective_rgb);
+                        let outline = if effective_rgb == 0 || near {
+                            Some(get_dark_color(effective_rgb, true))
+                        } else {
+                            None
+                        };
+                        (
+                            c,
+                            outline,
+                            crate::renderer::chunk::block_lighter::LightLevels::FULL_BRIGHT.lane(),
+                        )
+                    } else {
+                        let c = if effective_rgb == 0 {
+                            default_dark
+                        } else {
+                            rgb_to_vec4(effective_rgb)
+                        };
+                        (c, None, sign.light.lane())
+                    };
 
-                    let start_x = -((line_w / 2.0).floor());
+                    let shown = first_line(&line.text, max_width, glyph_map);
+                    let line_w = text_width(&shown, glyph_map);
+                    let start_x = -((line_w as i32 / 2) as f32);
                     let y0 = line_idx as f32 * line_height - midpoint;
 
                     let mut emit_glyph_mesh = |dx: f32, dy: f32, z: f32, color: [f32; 4]| {
                         let mut cur_x = start_x + dx;
                         let line_y = y0 + dy;
-                        for &ch in &line_chars {
+                        for ch in shown.chars() {
                             if verts.len() + 6 > MAX_SIGN_VERTS {
                                 return;
                             }
@@ -325,7 +323,7 @@ impl SignTextPipeline {
                         }
                     }
 
-                    let z_offset = if outline_color.is_some() { 0.05 } else { 0.0 };
+                    let z_offset = if outline_color.is_some() { 0.1 } else { 0.0 };
                     emit_glyph_mesh(0.0, 0.0, z_offset, text_color);
                 }
             }
@@ -380,4 +378,32 @@ fn create_pipeline(
             )
         },
     )
+}
+
+fn first_line(line: &str, max_width: f32, glyph_map: &GlyphMap) -> String {
+    let mut width = 0.0f32;
+    let mut last_space = None;
+    for (i, c) in line.char_indices() {
+        if c == '\n' {
+            return line[..i].to_owned();
+        }
+        if c == ' ' {
+            last_space = Some(i);
+        }
+        let adv = glyph_map.glyph(c, None).advance;
+        width += adv;
+        if width > max_width {
+            let end = match last_space {
+                Some(s) if s > 0 => s,
+                _ if i > 0 => i,
+                _ => c.len_utf8(),
+            };
+            return line[..end].to_owned();
+        }
+    }
+    line.to_owned()
+}
+
+fn text_width(line: &str, glyph_map: &GlyphMap) -> f32 {
+    line.chars().map(|c| glyph_map.glyph(c, None).advance).sum::<f32>().ceil()
 }
