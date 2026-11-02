@@ -154,8 +154,6 @@ pub fn build_player_tab_overlay(
         );
         let info = players[i];
         if show_heads {
-            // TODO: vanilla hides the hat layer per `showHat` and flips the
-            // face for Dinnerbone/Grumm; faces here always carry the hat.
             elements.push(MenuElement::SkinFace {
                 x: row_left as f32 * gs,
                 y: yo as f32 * gs,
@@ -166,7 +164,6 @@ pub fn build_player_tab_overlay(
         }
         let mut spans = display_names[i].clone();
         if info.game_mode == SPECTATOR_GAME_MODE {
-            // Vanilla `decorateName`: spectators are italicized, nothing else.
             for span in &mut spans {
                 span.italic = true;
             }
@@ -188,8 +185,6 @@ pub fn build_player_tab_overlay(
     }
 }
 
-/// Vanilla `Font.split` on the header or footer: it splits the decomposed
-/// text, so a legacy code is never parted from its letter.
 fn wrap_lines(
     text: &[TextSpan],
     max_w: f32,
@@ -210,16 +205,39 @@ pub struct PlayerNameplates<'a> {
     pub partial_tick: f32,
     pub gs: f32,
     pub camera_pos: glam::DVec3,
+    pub camera_fov_deg: f32,
+    pub screen_height: f32,
+    pub chunks: &'a crate::world::chunk::ChunkStore,
+    pub block_state_table: crate::world::block::BlockStateTable,
+    pub target_entity_id: Option<i32>,
     pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
+    pub spans_width: &'a dyn Fn(&[TextSpan], f32) -> f32,
 }
 
-// TODO: vanilla renders name tags as world-space billboards (0.025 scale,
-// shrinking with distance, 25% black backdrop, a see-through pass behind
-// walls, sneak dimming, no shadow) and honors team nametagVisibility; this
-// screen-space projection is an approximation until a world-space text path
-// exists.
+fn is_occluded(
+    origin: glam::DVec3,
+    target: glam::DVec3,
+    chunks: &crate::world::chunk::ChunkStore,
+    block_state_table: crate::world::block::BlockStateTable,
+) -> bool {
+    let delta = target - origin;
+    let dist = delta.length() as f32;
+    if dist < 0.1 {
+        return false;
+    }
+    let dir = (delta / dist as f64).as_vec3();
+    if let Some(hit) =
+        crate::player::interaction::raycast(origin, dir, dist, chunks, block_state_table, None)
+    {
+        (hit.hit_point - origin).length() < (dist - 0.2) as f64
+    } else {
+        false
+    }
+}
+
 pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
-    for entity in nameplates.entity_store.living.values() {
+    let fov = (nameplates.camera_fov_deg.to_radians() * 0.5).tan();
+    for (&entity_id, entity) in &nameplates.entity_store.living {
         if let Some(uuid) = entity.player_uuid {
             if uuid == nameplates.local_uuid {
                 continue;
@@ -232,73 +250,158 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
                 .lerp(entity.position, nameplates.partial_tick as f64)
                 + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
             let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
-            if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+            let dist_sq = (*pos - nameplates.camera_pos).length_squared();
+            if dist_sq > max_distance * max_distance {
+                continue;
+            }
+            let dist = dist_sq.sqrt() as f32;
+            let occluded = is_occluded(
+                nameplates.camera_pos,
+                *pos,
+                nameplates.chunks,
+                nameplates.block_state_table,
+            );
+            if entity.is_crouching && occluded {
                 continue;
             }
             let Some((x, y)) = (nameplates.project)(*pos) else {
                 continue;
             };
+            let font_scale = (0.25 * nameplates.screen_height / (2.0 * fov * dist.max(0.1)))
+                .clamp(4.0, FONT_SIZE * nameplates.gs);
+            let mut spans = nameplates.scoreboard.player_name(&player.name, None);
+            if occluded {
+                for span in &mut spans {
+                    span.color[3] *= 0.3;
+                }
+            } else {
+                let w = (nameplates.spans_width)(&spans, font_scale);
+                let pad_x = font_scale / 8.0;
+                let pad_y = font_scale / 8.0;
+                elements.push(MenuElement::Rect {
+                    x: x - w * 0.5 - pad_x,
+                    y: y - 0.5 * font_scale - pad_y,
+                    w: w + pad_x * 2.0,
+                    h: font_scale + pad_y * 2.0,
+                    corner_radius: 0.0,
+                    color: [0.0, 0.0, 0.0, 0.25],
+                });
+            }
             elements.push(MenuElement::TextSpans {
                 x,
-                y: y - 4.0 * nameplates.gs,
-                spans: nameplates.scoreboard.player_name(&player.name, None),
-                scale: FONT_SIZE * nameplates.gs,
+                y: y - 0.5 * font_scale,
+                spans,
+                scale: font_scale,
                 centered: true,
             });
         } else if let Some(spans) = &entity.custom_name_spans {
-            if !entity.custom_name_visible {
+            let is_targeted = nameplates.target_entity_id == Some(entity_id);
+            if !entity.custom_name_visible && !is_targeted {
                 continue;
             }
-            let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
-            let offset_y = if entity.entity_type == azalea_registry::builtin::EntityKind::ArmorStand {
-                height as f64
+            let max_distance = if is_targeted && !entity.custom_name_visible {
+                16.0
             } else {
-                height as f64 + 0.5
+                32.0
             };
+            let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+            let offset_y = height as f64 + 0.5;
             let pos = entity
                 .prev_position
                 .lerp(entity.position, nameplates.partial_tick as f64)
                 + glam::DVec3::Y * offset_y;
-            let max_distance = 64.0;
-            if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+            let dist_sq = (*pos - nameplates.camera_pos).length_squared();
+            if dist_sq > max_distance * max_distance {
+                continue;
+            }
+            let dist = dist_sq.sqrt() as f32;
+            let occluded = is_occluded(
+                nameplates.camera_pos,
+                *pos,
+                nameplates.chunks,
+                nameplates.block_state_table,
+            );
+            if occluded {
                 continue;
             }
             let Some((x, y)) = (nameplates.project)(*pos) else {
                 continue;
             };
+            let font_scale = (0.25 * nameplates.screen_height / (2.0 * fov * dist.max(0.1)))
+                .clamp(4.0, FONT_SIZE * nameplates.gs);
+            let w = (nameplates.spans_width)(spans, font_scale);
+            let pad_x = font_scale / 8.0;
+            let pad_y = font_scale / 8.0;
+            elements.push(MenuElement::Rect {
+                x: x - w * 0.5 - pad_x,
+                y: y - 0.5 * font_scale - pad_y,
+                w: w + pad_x * 2.0,
+                h: font_scale + pad_y * 2.0,
+                corner_radius: 0.0,
+                color: [0.0, 0.0, 0.0, 0.25],
+            });
             elements.push(MenuElement::TextSpans {
                 x,
-                y: y - 4.0 * nameplates.gs,
+                y: y - 0.5 * font_scale,
                 spans: spans.clone(),
-                scale: FONT_SIZE * nameplates.gs,
+                scale: font_scale,
                 centered: true,
             });
         } else if let Some(name) = &entity.custom_name {
-            if !entity.custom_name_visible {
+            let is_targeted = nameplates.target_entity_id == Some(entity_id);
+            if !entity.custom_name_visible && !is_targeted {
                 continue;
             }
-            let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
-            let offset_y = if entity.entity_type == azalea_registry::builtin::EntityKind::ArmorStand {
-                height as f64
+            let max_distance = if is_targeted && !entity.custom_name_visible {
+                16.0
             } else {
-                height as f64 + 0.5
+                32.0
             };
+            let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+            let offset_y = height as f64 + 0.5;
             let pos = entity
                 .prev_position
                 .lerp(entity.position, nameplates.partial_tick as f64)
                 + glam::DVec3::Y * offset_y;
-            let max_distance = 64.0;
-            if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+            let dist_sq = (*pos - nameplates.camera_pos).length_squared();
+            if dist_sq > max_distance * max_distance {
+                continue;
+            }
+            let dist = dist_sq.sqrt() as f32;
+            let occluded = is_occluded(
+                nameplates.camera_pos,
+                *pos,
+                nameplates.chunks,
+                nameplates.block_state_table,
+            );
+            if occluded {
                 continue;
             }
             let Some((x, y)) = (nameplates.project)(*pos) else {
                 continue;
             };
+            let font_scale = (0.25 * nameplates.screen_height / (2.0 * fov * dist.max(0.1)))
+                .clamp(4.0, FONT_SIZE * nameplates.gs);
+            let spans = vec![crate::ui::text::TextSpan::new(
+                name.clone(),
+                [1.0, 1.0, 1.0, 1.0],
+            )];
+            let w = (nameplates.spans_width)(&spans, font_scale);
+            let pad_x = font_scale / 8.0;
+            let pad_y = font_scale / 8.0;
+            elements.push(MenuElement::Rect {
+                x: x - w * 0.5 - pad_x,
+                y: y - 0.5 * font_scale - pad_y,
+                w: w + pad_x * 2.0,
+                h: font_scale + pad_y * 2.0,
+                corner_radius: 0.0,
+                color: [0.0, 0.0, 0.0, 0.25],
+            });
             elements.push(MenuElement::TextSpans {
                 x,
-                y: y - 4.0 * nameplates.gs,
-                spans: vec![crate::ui::text::TextSpan::new(name.clone(), [1.0, 1.0, 1.0, 1.0])],
-                scale: FONT_SIZE * nameplates.gs,
+                y: y - 0.5 * font_scale,
+                spans,
+                scale: font_scale,
                 centered: true,
             });
         }

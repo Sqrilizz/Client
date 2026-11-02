@@ -3149,6 +3149,10 @@ pub fn update_game(
 
     if !benchmark_running && !game.hide_gui {
         let renderer = &gfx.renderer;
+        let target_entity_id = match game.interaction.target {
+            Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
+            _ => None,
+        };
         crate::ui::player_tab::build_player_nameplates(
             &mut elements,
             crate::ui::player_tab::PlayerNameplates {
@@ -3159,7 +3163,13 @@ pub fn update_game(
                 partial_tick,
                 gs,
                 camera_pos: renderer.camera_render_position(),
+                camera_fov_deg: renderer.camera_fov_degrees(),
+                screen_height: sh as f32,
+                chunks: &game.chunk_store,
+                block_state_table: game.block_registry.block_state_table(),
+                target_entity_id,
                 project: &|position| renderer.project_world_to_screen(position),
+                spans_width: &|spans, s| renderer.menu_spans_width(spans, s),
             },
         );
         crate::entity::text_display::build_text_displays(
@@ -3172,6 +3182,16 @@ pub fn update_game(
             sh as f32,
             &|position| renderer.project_world_to_screen(position),
             &|spans, s| renderer.menu_spans_width(spans, s),
+        );
+        crate::world::block_entity::build_sign_texts(
+            &mut elements,
+            &game.chunk_store,
+            game.block_registry.block_state_table(),
+            renderer.camera_render_position(),
+            renderer.camera_fov_degrees(),
+            sh as f32,
+            gs,
+            &|position| renderer.project_world_to_screen(position),
         );
     }
 

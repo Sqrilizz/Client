@@ -131,13 +131,9 @@ pub fn build_text_displays(
             continue;
         }
         let distance = (distance_sq.sqrt() as f32).max(0.1);
-        let Some((screen_x, screen_y)) = project(pos) else {
-            continue;
-        };
 
         let font_scale =
             (0.25 * display.scale.y * screen_height / (2.0 * fov * distance)).clamp(6.0, 32.0 * gs);
-        let line_height = font_scale * 1.15;
 
         let mut lines: Vec<Vec<TextSpan>> = Vec::new();
         let mut current_line = Vec::new();
@@ -162,16 +158,20 @@ pub fn build_text_displays(
             lines.push(current_line);
         }
 
-        let total_h = lines.len() as f32 * line_height;
-        let start_y = screen_y - total_h * 0.5;
-
         let bg_a = ((display.background_color >> 24) & 0xff) as f32 / 255.0;
         let bg_r = ((display.background_color >> 16) & 0xff) as f32 / 255.0;
         let bg_g = ((display.background_color >> 8) & 0xff) as f32 / 255.0;
         let bg_b = (display.background_color & 0xff) as f32 / 255.0;
 
+        let line_count = lines.len();
         for (idx, line) in lines.iter().enumerate() {
-            let y = start_y + idx as f32 * line_height;
+            let y_offset =
+                ((line_count as f64 - 1.0) * 0.5 - idx as f64) * 0.25 * display.scale.y as f64;
+            let line_pos = DVec3::new(pos.x, pos.y + y_offset, pos.z);
+            let Some((screen_x, screen_y)) = project(line_pos) else {
+                continue;
+            };
+            let y = screen_y - font_scale * 0.5;
             if bg_a > 0.0 {
                 let w = spans_width(line, font_scale);
                 if w > 0.0 {
@@ -196,7 +196,6 @@ pub fn build_text_displays(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -230,12 +229,7 @@ mod tests {
         let uuid = uuid::Uuid::new_v4();
         let pos = Position::new(0.0, 0.0, 5.0);
         store.spawn(1, uuid, pos);
-        store.set_text(
-            1,
-            vec![
-                TextSpan::new("Line 1\nLine 2".into(), [1.0; 4]),
-            ],
-        );
+        store.set_text(1, vec![TextSpan::new("Line 1\nLine 2".into(), [1.0; 4])]);
 
         let mut elements = Vec::new();
         let camera_pos = DVec3::ZERO;
