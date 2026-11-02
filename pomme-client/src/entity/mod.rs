@@ -62,6 +62,7 @@ pub enum MetaValue {
     Byte(u8),
     Float(f32),
     Long(i64),
+    Vector3(f32, f32, f32),
 }
 
 /// Vanilla `Sniffer.State`, in id order.
@@ -874,6 +875,8 @@ pub struct LivingEntity {
     pub death_time: u32,
     pub age_in_ticks: u32,
     pub custom_name: Option<String>,
+    pub custom_name_spans: Option<Vec<crate::ui::text::TextSpan>>,
+    pub custom_name_visible: bool,
     /// Mob is targeting/attacking (metadata mob-flags bit 0x04). Raises
     /// zombie/skeleton arms.
     pub aggressive: bool,
@@ -1111,6 +1114,8 @@ impl LivingEntity {
             death_time: 0,
             age_in_ticks: 0,
             custom_name: None,
+            custom_name_spans: None,
+            custom_name_visible: false,
             aggressive: false,
             no_ai: false,
             powered: false,
@@ -2020,6 +2025,7 @@ impl EntityStore {
                 entity.is_invisible = shared_flags_invisible(f);
                 entity.is_glowing = shared_flags_glowing(f);
             }
+            (_, 3, Bool(b)) => entity.custom_name_visible = b,
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
@@ -2224,9 +2230,15 @@ impl EntityStore {
         }
     }
 
-    pub fn set_custom_name(&mut self, id: i32, name: Option<String>) {
+    pub fn set_custom_name(
+        &mut self,
+        id: i32,
+        name: Option<String>,
+        spans: Option<Vec<crate::ui::text::TextSpan>>,
+    ) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.custom_name = name;
+            entity.custom_name_spans = spans;
         }
     }
 
@@ -2573,6 +2585,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Turtle
                 | EntityKind::Axolotl
                 | EntityKind::PolarBear
+                | EntityKind::ArmorStand
         )
 }
 

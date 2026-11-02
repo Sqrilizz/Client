@@ -19,6 +19,8 @@ pub struct TextDisplayEntity {
     pub line_width: i32,
     pub see_through: bool,
     pub text_opacity: u8,
+    pub translation: glam::Vec3,
+    pub scale: glam::Vec3,
 }
 
 pub struct TextDisplayStore {
@@ -46,6 +48,8 @@ impl TextDisplayStore {
                 line_width: 200,
                 see_through: false,
                 text_opacity: 255,
+                translation: glam::Vec3::ZERO,
+                scale: glam::Vec3::ONE,
             },
         );
     }
@@ -76,11 +80,17 @@ impl TextDisplayStore {
         }
     }
 
+    pub fn get_mut(&mut self, id: i32) -> Option<&mut TextDisplayEntity> {
+        self.displays.get_mut(&id)
+    }
+
     pub fn apply_entity_data(&mut self, id: i32, index: u8, value: MetaValue) {
         let Some(display) = self.displays.get_mut(&id) else {
             return;
         };
         match (index, value) {
+            (11, MetaValue::Vector3(x, y, z)) => display.translation = glam::Vec3::new(x, y, z),
+            (12, MetaValue::Vector3(x, y, z)) => display.scale = glam::Vec3::new(x, y, z),
             (15, MetaValue::Byte(b)) => display.billboard = b,
             (24, MetaValue::Int(w)) => display.line_width = w,
             (25, MetaValue::Int(c)) => display.background_color = c as u32,
@@ -111,20 +121,22 @@ pub fn build_text_displays(
         if display.text.is_empty() {
             continue;
         }
-        let pos = display
+        let base_pos = display
             .prev_position
             .lerp(display.position, partial_tick as f64);
-        let to_cam = *pos - camera_pos;
+        let pos = *base_pos + display.translation.as_dvec3();
+        let to_cam = pos - camera_pos;
         let distance_sq = to_cam.length_squared();
         if distance_sq > 64.0 * 64.0 {
             continue;
         }
         let distance = (distance_sq.sqrt() as f32).max(0.1);
-        let Some((screen_x, screen_y)) = project(*pos) else {
+        let Some((screen_x, screen_y)) = project(pos) else {
             continue;
         };
 
-        let font_scale = (0.25 * screen_height / (2.0 * fov * distance)).clamp(6.0, 32.0 * gs);
+        let font_scale =
+            (0.25 * display.scale.y * screen_height / (2.0 * fov * distance)).clamp(6.0, 32.0 * gs);
         let line_height = font_scale * 1.15;
 
         let mut lines: Vec<Vec<TextSpan>> = Vec::new();

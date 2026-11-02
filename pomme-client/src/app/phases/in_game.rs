@@ -272,6 +272,7 @@ pub struct GameState {
     pub controlled_vehicle_id: Option<i32>,
     /// Vehicle we are any passenger of (vanilla `getVehicle`).
     pub riding_vehicle_id: Option<i32>,
+    pub vehicle_passengers: HashMap<i32, Vec<i32>>,
     /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
     pub vignette_brightness: f32,
     pub interaction: InteractionState,
@@ -594,6 +595,7 @@ impl GameState {
             xp_display_start_tick: i64::MIN,
             controlled_vehicle_id: None,
             riding_vehicle_id: None,
+            vehicle_passengers: HashMap::new(),
             vignette_brightness: 1.0,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
@@ -674,6 +676,31 @@ impl GameState {
     /// ridden vehicle when it is living (`Entity.showVehicleHealth`).
     pub fn vehicle_health(&self) -> Option<(f32, f32)> {
         self.riding_vehicle().map(|e| (e.health, e.max_health))
+    }
+
+    pub fn sync_passengers(&mut self, vehicle_id: i32) {
+        let Some(passengers) = self.vehicle_passengers.get(&vehicle_id).cloned() else {
+            return;
+        };
+        let vehicle_pos = if let Some(e) = self.entity_store.living.get(&vehicle_id) {
+            let height = crate::entity::dimensions::EntityDimensions::of(e.entity_type).height;
+            Some(*e.position + glam::DVec3::Y * (height as f64))
+        } else if let Some(pos) = self.entity_positions.get(&vehicle_id) {
+            Some(**pos)
+        } else {
+            None
+        };
+        let Some(pos) = vehicle_pos else { return };
+        for passenger_id in passengers {
+            if let Some(display) = self.text_display_store.get_mut(passenger_id) {
+                display.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
+                display.prev_position = display.position;
+            }
+            if let Some(e) = self.entity_store.living.get_mut(&passenger_id) {
+                e.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
+                e.prev_position = e.position;
+            }
+        }
     }
 
     // TODO: vanilla scales each distance by `getScale()` (the `scale`

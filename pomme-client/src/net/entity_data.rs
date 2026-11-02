@@ -147,17 +147,22 @@ fn send_data_value(
         }
         // Entity.DATA_CUSTOM_NAME; needed for jeb_ sheep detection.
         (2, Value::OptionalComponent(name)) => {
-            let name = match name {
+            let (name, spans) = match name {
                 Some(nbt) => match super::chat::read_component(nbt, &mut 0) {
-                    Ok(name) => Some(name.plain_text()),
+                    Ok(component) => {
+                        let plain = component.plain_text();
+                        let spans = crate::ui::text::format_component_spans(&component, [1.0, 1.0, 1.0, 1.0]);
+                        let spans = crate::ui::text::legacy_format_spans(&spans, true);
+                        (Some(plain), Some(spans))
+                    }
                     Err(e) => {
                         tracing::debug!("Skipping unreadable custom name: {e}");
                         return;
                     }
                 },
-                None => None,
+                None => (None, None),
             };
-            NetworkEvent::EntityCustomName { id, name }
+            NetworkEvent::EntityCustomName { id, name, spans }
         }
         (23, Value::OptionalComponent(Some(nbt))) => {
             let spans = match super::chat::read_component(nbt, &mut 0) {
@@ -218,6 +223,7 @@ fn send_scalar(id: i32, index: u8, value: &Value, event_tx: &Sender<NetworkEvent
         Value::Byte(v) => MetaValue::Byte(*v),
         Value::Float(v) => MetaValue::Float(*v),
         Value::Long(v) => MetaValue::Long(*v),
+        Value::Vector3(x, y, z) => MetaValue::Vector3(*x, *y, *z),
         _ => return,
     };
     send_ordered(event_tx, NetworkEvent::EntityData { id, index, value });
@@ -263,6 +269,7 @@ pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
         // TODO: azalea's `ArmadilloStateKind` lacks UNROLLING (id 3), so a
         // translated session fails to decode that state.
         EntityDataValue::ArmadilloState(state) => Value::Int(*state as i32),
+        EntityDataValue::Vector3(v) => Value::Vector3(v.x, v.y, v.z),
         _ => return None,
     })
 }

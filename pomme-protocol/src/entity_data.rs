@@ -33,6 +33,7 @@ pub enum Serializer {
     VillagerData,
     Pose,
     Variant(Variant),
+    Vector3,
     Skip(Shape),
 }
 
@@ -57,6 +58,7 @@ pub enum Value {
     Pose(u32),
     /// A registry id.
     Variant(Variant, u32),
+    Vector3(f32, f32, f32),
     /// A value the client doesn't read.
     Other,
 }
@@ -149,7 +151,7 @@ macro_rules! serializers_26_2 {
     S::Int,
     S::Int,
     // VECTOR3: ByteBufCodecs.VECTOR3F
-    S::Skip(Struct(&[Float, Float, Float])),
+    S::Vector3,
     // QUATERNION: ByteBufCodecs.QUATERNIONF
     S::Skip(Struct(&[Float, Float, Float, Float])),
     S::Skip(Ref(&RESOLVABLE_PROFILE)),
@@ -213,6 +215,7 @@ impl ItemCodec {
             },
             S::Pose => Value::Pose(r.varint()?),
             S::Variant(variant) => Value::Variant(*variant, r.varint()?),
+            S::Vector3 => Value::Vector3(r.f32()?, r.f32()?, r.f32()?),
             S::Skip(shape) => {
                 self.skip(r, shape)?;
                 Value::Other

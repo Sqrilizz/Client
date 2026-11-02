@@ -220,36 +220,88 @@ pub struct PlayerNameplates<'a> {
 // exists.
 pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
     for entity in nameplates.entity_store.living.values() {
-        let Some(uuid) = entity.player_uuid else {
-            continue;
-        };
-        if uuid == nameplates.local_uuid {
-            continue;
+        if let Some(uuid) = entity.player_uuid {
+            if uuid == nameplates.local_uuid {
+                continue;
+            }
+            let Some(player) = nameplates.tab_list.players.get(&uuid) else {
+                continue;
+            };
+            let pos = entity
+                .prev_position
+                .lerp(entity.position, nameplates.partial_tick as f64)
+                + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
+            let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
+            if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+                continue;
+            }
+            let Some((x, y)) = (nameplates.project)(*pos) else {
+                continue;
+            };
+            elements.push(MenuElement::TextSpans {
+                x,
+                y: y - 4.0 * nameplates.gs,
+                spans: nameplates.scoreboard.player_name(&player.name, None),
+                scale: FONT_SIZE * nameplates.gs,
+                centered: true,
+            });
+        } else if let Some(spans) = &entity.custom_name_spans {
+            if !entity.custom_name_visible {
+                continue;
+            }
+            let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+            let offset_y = if entity.entity_type == azalea_registry::builtin::EntityKind::ArmorStand {
+                height as f64
+            } else {
+                height as f64 + 0.5
+            };
+            let pos = entity
+                .prev_position
+                .lerp(entity.position, nameplates.partial_tick as f64)
+                + glam::DVec3::Y * offset_y;
+            let max_distance = 64.0;
+            if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+                continue;
+            }
+            let Some((x, y)) = (nameplates.project)(*pos) else {
+                continue;
+            };
+            elements.push(MenuElement::TextSpans {
+                x,
+                y: y - 4.0 * nameplates.gs,
+                spans: spans.clone(),
+                scale: FONT_SIZE * nameplates.gs,
+                centered: true,
+            });
+        } else if let Some(name) = &entity.custom_name {
+            if !entity.custom_name_visible {
+                continue;
+            }
+            let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+            let offset_y = if entity.entity_type == azalea_registry::builtin::EntityKind::ArmorStand {
+                height as f64
+            } else {
+                height as f64 + 0.5
+            };
+            let pos = entity
+                .prev_position
+                .lerp(entity.position, nameplates.partial_tick as f64)
+                + glam::DVec3::Y * offset_y;
+            let max_distance = 64.0;
+            if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+                continue;
+            }
+            let Some((x, y)) = (nameplates.project)(*pos) else {
+                continue;
+            };
+            elements.push(MenuElement::TextSpans {
+                x,
+                y: y - 4.0 * nameplates.gs,
+                spans: vec![crate::ui::text::TextSpan::new(name.clone(), [1.0, 1.0, 1.0, 1.0])],
+                scale: FONT_SIZE * nameplates.gs,
+                centered: true,
+            });
         }
-        let Some(player) = nameplates.tab_list.players.get(&uuid) else {
-            continue;
-        };
-        let pos = entity
-            .prev_position
-            .lerp(entity.position, nameplates.partial_tick as f64)
-            // Vanilla anchors at the pose bounding-box height + 0.5.
-            + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
-        let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
-        if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
-            continue;
-        }
-        let Some((x, y)) = (nameplates.project)(*pos) else {
-            continue;
-        };
-        elements.push(MenuElement::TextSpans {
-            x,
-            y: y - 4.0 * nameplates.gs,
-            // The tab-list display name is tab-only in vanilla; name tags
-            // always use the team-formatted profile name.
-            spans: nameplates.scoreboard.player_name(&player.name, None),
-            scale: FONT_SIZE * nameplates.gs,
-            centered: true,
-        });
     }
 }
 

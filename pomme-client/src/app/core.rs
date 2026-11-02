@@ -1917,6 +1917,8 @@ impl AppCore {
                             game.controlled_vehicle_id = None;
                         }
                     }
+                    game.vehicle_passengers.insert(vehicle, passengers);
+                    game.sync_passengers(vehicle);
                 }
                 NetworkEvent::EntityEquipment { entity_id, slots } => {
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
@@ -2648,6 +2650,7 @@ impl AppCore {
                         *pos += dvec3(dx, dy, dz);
                         self.audio.update_entity_sound_position(id, *pos);
                     }
+                    game.sync_passengers(id);
                 }
                 NetworkEvent::EntityMovedRotated {
                     id,
@@ -2668,6 +2671,7 @@ impl AppCore {
                         *pos += dvec3(dx, dy, dz);
                         self.audio.update_entity_sound_position(id, *pos);
                     }
+                    game.sync_passengers(id);
                 }
                 NetworkEvent::EntityRotated {
                     id,
@@ -2711,6 +2715,7 @@ impl AppCore {
                     game.text_display_store.teleport(id, position);
                     game.entity_positions.insert(id, position);
                     self.audio.update_entity_sound_position(id, position);
+                    game.sync_passengers(id);
                 }
                 NetworkEvent::LevelEvent {
                     event_type,
@@ -2773,6 +2778,9 @@ impl AppCore {
                     }
                     if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
                         game.riding_vehicle_id = None;
+                    }
+                    for id in &ids {
+                        game.vehicle_passengers.remove(id);
                     }
                 }
                 NetworkEvent::EntityHeadRotation {
@@ -2921,8 +2929,8 @@ impl AppCore {
                     game.entity_store
                         .set_villager_data(id, kind, profession, level);
                 }
-                NetworkEvent::EntityCustomName { id, name } => {
-                    game.entity_store.set_custom_name(id, name);
+                NetworkEvent::EntityCustomName { id, name, spans } => {
+                    game.entity_store.set_custom_name(id, name, spans);
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
