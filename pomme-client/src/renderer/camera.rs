@@ -387,10 +387,8 @@ impl Camera {
     }
 
     fn culling_view_projection(&self, fov: f32) -> Mat4 {
-        let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
-        // Vanilla prepares the cull frustum before bobHurt/bobView are applied.
-        let view = view::look_to_mat4(offset, forward, up);
+        let view = view::look_to_mat4(Vec3::ZERO, forward, up);
         let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
         proj.y_axis.y *= -1.0;
         proj * view
@@ -577,11 +575,10 @@ impl Camera {
     }
 
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
-        let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
-        let view = self.view_effect_matrix() * view::look_to_mat4(offset, forward, up);
+        let view = self.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
         let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
-        proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
+        proj.y_axis.y *= -1.0;
         proj * view
     }
 }

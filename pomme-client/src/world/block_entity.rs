@@ -291,13 +291,12 @@ fn extract_json_text(v: &serde_json::Value, out: &mut String) {
     match v {
         serde_json::Value::String(s) => {
             let trimmed = s.trim();
-            if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+                && let Ok(nested) = serde_json::from_str::<serde_json::Value>(trimmed)
             {
-                if let Ok(nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    extract_json_text(&nested, out);
-                    return;
-                }
+                extract_json_text(&nested, out);
+                return;
             }
             out.push_str(s);
         }
@@ -313,10 +312,10 @@ fn extract_json_text(v: &serde_json::Value, out: &mut String) {
             if let Some(extra) = map.get("extra") {
                 extract_json_text(extra, out);
             }
-            if let Some(t) = map.get("translate").and_then(|v| v.as_str()) {
-                if map.get("text").is_none() {
-                    out.push_str(t);
-                }
+            if let Some(t) = map.get("translate").and_then(|v| v.as_str())
+                && map.get("text").is_none()
+            {
+                out.push_str(t);
             }
         }
         _ => {}
@@ -327,12 +326,11 @@ fn extract_json_color(v: &serde_json::Value) -> Option<u32> {
     match v {
         serde_json::Value::String(s) => {
             let trimmed = s.trim();
-            if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+                && let Ok(nested) = serde_json::from_str::<serde_json::Value>(trimmed)
             {
-                if let Ok(nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    return extract_json_color(&nested);
-                }
+                return extract_json_color(&nested);
             }
             None
         }
@@ -341,16 +339,16 @@ fn extract_json_color(v: &serde_json::Value) -> Option<u32> {
                 if let Some(rgb) = dye_color_rgb(c).or_else(|| named_color_rgb(c)) {
                     return Some(rgb);
                 }
-                if let Some(hex) = c.strip_prefix('#') {
-                    if let Ok(rgb) = u32::from_str_radix(hex, 16) {
-                        return Some(rgb);
-                    }
-                }
-            }
-            if let Some(extra) = map.get("extra") {
-                if let Some(rgb) = extract_json_color(extra) {
+                if let Some(hex) = c.strip_prefix('#')
+                    && let Ok(rgb) = u32::from_str_radix(hex, 16)
+                {
                     return Some(rgb);
                 }
+            }
+            if let Some(extra) = map.get("extra")
+                && let Some(rgb) = extract_json_color(extra)
+            {
+                return Some(rgb);
             }
             None
         }
@@ -371,14 +369,14 @@ fn extract_first_code_color(text: &str) -> (String, Option<u32>) {
     let mut color = None;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '§' {
-            if let Some(&code) = chars.peek() {
-                chars.next();
-                if color.is_none() {
-                    color = code_color_rgb(code);
-                }
-                continue;
+        if c == '§'
+            && let Some(&code) = chars.peek()
+        {
+            chars.next();
+            if color.is_none() {
+                color = code_color_rgb(code);
             }
+            continue;
         }
         out.push(c);
     }
@@ -389,10 +387,10 @@ fn extract_nbt_compound_text(c: &NbtCompound, out: &mut String, color: &mut Opti
     if let Some(s) = c.string("text") {
         out.push_str(&s.to_str());
     }
-    if color.is_none() {
-        if let Some(col) = c.string("color") {
-            *color = dye_color_rgb(&col.to_str()).or_else(|| named_color_rgb(&col.to_str()));
-        }
+    if color.is_none()
+        && let Some(col) = c.string("color")
+    {
+        *color = dye_color_rgb(&col.to_str()).or_else(|| named_color_rgb(&col.to_str()));
     }
     if let Some(extra) = c.list("extra") {
         if let Some(extra_strings) = extra.strings() {
@@ -401,7 +399,7 @@ fn extract_nbt_compound_text(c: &NbtCompound, out: &mut String, color: &mut Opti
             }
         } else if let Some(extra_compounds) = extra.compounds() {
             for ec in extra_compounds {
-                extract_nbt_compound_text(&ec, out, color);
+                extract_nbt_compound_text(ec, out, color);
             }
         }
     }
@@ -505,10 +503,10 @@ pub fn parse_sign_render_info(
         let mut color_rgb = 0u32;
         let mut glowing = false;
         if let Some(t) = tag {
-            if let Some(color_name) = t.string("color") {
-                if let Some(rgb) = dye_color_rgb(&color_name.to_str()) {
-                    color_rgb = rgb;
-                }
+            if let Some(color_name) = t.string("color")
+                && let Some(rgb) = dye_color_rgb(&color_name.to_str())
+            {
+                color_rgb = rgb;
             }
             if let Some(b) = t.byte("has_glowing_text") {
                 glowing = b != 0;
@@ -525,10 +523,10 @@ pub fn parse_sign_render_info(
                         }
                     }
                 } else if let Some(compounds) = list.compounds() {
-                    for (i, c) in compounds.into_iter().enumerate().take(4) {
+                    for (i, c) in compounds.iter().enumerate().take(4) {
                         let mut text = String::new();
                         let mut color = None;
-                        extract_nbt_compound_text(&c, &mut text, &mut color);
+                        extract_nbt_compound_text(c, &mut text, &mut color);
                         let mut parsed = parse_line(&text);
                         if parsed.color_rgb.is_none() {
                             parsed.color_rgb = color;

@@ -151,6 +151,8 @@ fn main() {
         ("entity_shadow.frag", shaderc::ShaderKind::Fragment),
         ("sign_text.vert", shaderc::ShaderKind::Vertex),
         ("sign_text.frag", shaderc::ShaderKind::Fragment),
+        ("nameplate.vert", shaderc::ShaderKind::Vertex),
+        ("nameplate.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {

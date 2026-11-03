@@ -750,21 +750,18 @@ impl GameState {
         self.paused = false;
         self.close_menu();
         self.chat.close(crate::ui::chat::ChatExitReason::Interrupted);
-        let (lines, wood_color, text_color) = self.read_sign_data(pos, is_front_text);
+        let (lines, is_hanging, is_wall, wood_index, text_color) =
+            self.read_sign_data(pos, is_front_text);
         self.sign_editor = Some(crate::ui::sign_edit::SignEditState::new(
             pos,
             is_front_text,
+            is_hanging,
+            is_wall,
+            wood_index,
             lines,
-            wood_color,
             text_color,
             self.gui_scale,
         ));
-    }
-
-    /// Vanilla `AbstractSignEditScreen.onCancel`: close without submitting;
-    /// the server keeps the sign's original text.
-    pub fn cancel_sign_editor(&mut self) {
-        self.sign_editor = None;
     }
 
     pub fn close_sign_editor(&mut self, connection: Option<&ConnectionHandle>) {
@@ -787,7 +784,7 @@ impl GameState {
         &self,
         pos: BlockPos,
         is_front_text: bool,
-    ) -> ([String; 4], [f32; 4], [f32; 4]) {
+    ) -> ([String; 4], bool, bool, u8, [f32; 4]) {
         let mut lines = [String::new(), String::new(), String::new(), String::new()];
         let mut text_color = [0.0, 0.0, 0.0, 1.0];
 
@@ -820,21 +817,14 @@ impl GameState {
         let state = self.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         let block_data = self.block_registry.block_state_data(state);
         let name = block_data.id();
-        let wood_color = match name {
-            s if s.starts_with("spruce") => [0.45, 0.34, 0.21, 1.0],
-            s if s.starts_with("birch") => [0.82, 0.77, 0.60, 1.0],
-            s if s.starts_with("jungle") => [0.60, 0.43, 0.31, 1.0],
-            s if s.starts_with("acacia") => [0.67, 0.36, 0.20, 1.0],
-            s if s.starts_with("dark_oak") => [0.27, 0.18, 0.10, 1.0],
-            s if s.starts_with("mangrove") => [0.44, 0.20, 0.18, 1.0],
-            s if s.starts_with("cherry") => [0.88, 0.65, 0.65, 1.0],
-            s if s.starts_with("bamboo") => [0.77, 0.68, 0.24, 1.0],
-            s if s.starts_with("crimson") => [0.41, 0.20, 0.27, 1.0],
-            s if s.starts_with("warped") => [0.18, 0.42, 0.40, 1.0],
-            _ => [0.65, 0.50, 0.32, 1.0],
-        };
+        let is_hanging = name.contains("hanging_sign");
+        let is_wall = name.contains("wall");
+        let wood_index = crate::renderer::pipelines::menu_overlay::SIGN_WOOD_TYPES
+            .iter()
+            .position(|&w| name.contains(w))
+            .unwrap_or(11) as u8;
 
-        (lines, wood_color, text_color)
+        (lines, is_hanging, is_wall, wood_index, text_color)
     }
 
     pub fn apply_local_sign_text(
@@ -3296,29 +3286,6 @@ pub fn update_game(
 
     if !benchmark_running && !game.hide_gui {
         let renderer = &gfx.renderer;
-        let target_entity_id = match game.interaction.target {
-            Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
-            _ => None,
-        };
-        crate::ui::player_tab::build_player_nameplates(
-            &mut elements,
-            crate::ui::player_tab::PlayerNameplates {
-                entity_store: &game.entity_store,
-                tab_list: &game.tab_list,
-                scoreboard: &game.scoreboard,
-                local_uuid: core.user.uuid,
-                partial_tick,
-                gs,
-                camera_pos: renderer.camera_render_position(),
-                camera_fov_deg: renderer.camera_fov_degrees(),
-                screen_height: sh as f32,
-                chunks: &game.chunk_store,
-                block_state_table: game.block_registry.block_state_table(),
-                target_entity_id,
-                project: &|position| renderer.project_world_to_screen(position),
-                spans_width: &|spans, s| renderer.menu_spans_width(spans, s),
-            },
-        );
         crate::entity::text_display::build_text_displays(
             &mut elements,
             &game.text_display_store,
@@ -3326,11 +3293,10 @@ pub fn update_game(
             gs,
             renderer.camera_render_position(),
             renderer.camera_fov_degrees(),
-            sh as f32,
+            sh,
             &|position| renderer.project_world_to_screen(position),
             &|spans, s| renderer.menu_spans_width(spans, s),
         );
-
     }
 
     if let Some(switcher) = &mut game.game_mode_switcher {
@@ -4269,7 +4235,7 @@ pub fn update_game(
             &text_events,
             &|s| gfx.renderer.menu_text_width(s, fs),
         );
-        let finish_result = editor.build(
+        let submitted = editor.build(
             &mut elements,
             sw,
             sh,
@@ -4278,18 +4244,7 @@ pub fn update_game(
             core.input.left_just_pressed(),
             &|s| gfx.renderer.menu_text_width(s, fs),
         );
-        match finish_result {
-            Some(crate::ui::sign_edit::SignEditResult::Submit) => {
-                game.close_sign_editor(Some(connection));
-                core.apply_cursor_grab(&gfx.window, Some(game));
-            }
-            Some(crate::ui::sign_edit::SignEditResult::Cancel) => {
-                game.cancel_sign_editor();
-                core.apply_cursor_grab(&gfx.window, Some(game));
-            }
-            None => {}
-        }
-        if finish_typing {
+        if submitted || finish_typing {
             game.close_sign_editor(Some(connection));
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
@@ -4512,6 +4467,11 @@ pub fn update_game(
             game.player.look_dir.y_rot_deg(),
             partial_tick,
         );
+        let interp_body_y_rot_deg = lerp_angle(
+            game.player.prev_body_y_rot,
+            game.player.body_y_rot,
+            partial_tick,
+        );
 
         let (radius, strength) =
             crate::entity::shadow::of_player(&game.player.attributes, game.player.invisible);
@@ -4522,7 +4482,7 @@ pub fn update_game(
                 game.player.is_sleeping(),
                 gfx.renderer.camera_look_dir().x_rot_deg(),
             ),
-            body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            body_y_rot_deg: interp_body_y_rot_deg,
             is_sleeping: game.player.is_sleeping(),
             sleeping_direction,
             sleeping_eye_height: crate::player::STANDING_EYE_HEIGHT,
@@ -4728,6 +4688,91 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    let nameplate_renders: Vec<crate::renderer::pipelines::nameplate::NameplateRenderInfo> =
+        if benchmark_running || game.hide_gui {
+            Vec::new()
+        } else {
+            let target_entity_id = match game.interaction.target {
+                Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
+                _ => None,
+            };
+            let mut list = Vec::new();
+            for (&entity_id, entity) in &game.entity_store.living {
+                if entity.sleeping_pos.is_some() {
+                    continue;
+                }
+                if entity.is_invisible && !spectating {
+                    let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+                    if !game.scoreboard.sees_friendly_invisible(&viewer, &name) {
+                        continue;
+                    }
+                }
+                let extras =
+                    entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64);
+                let interp_pos =
+                    entity.prev_position.lerp(entity.position, partial_tick as f64) + extras.render_offset;
+                if let Some(uuid) = entity.player_uuid {
+                    if uuid == core.user.uuid {
+                        continue;
+                    }
+                    let Some(player) = game.tab_list.players.get(&uuid) else {
+                        continue;
+                    };
+                    let pos = interp_pos
+                        + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
+                    let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
+                    let spans = game.scoreboard.player_name(&player.name, player.display_name.as_deref());
+                    list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                        position: *pos,
+                        spans,
+                        discrete: entity.is_crouching,
+                        max_distance,
+                    });
+                } else if let Some(spans) = &entity.custom_name_spans {
+                    let is_targeted = target_entity_id == Some(entity_id);
+                    if !entity.custom_name_visible && !is_targeted {
+                        continue;
+                    }
+                    let max_distance = if is_targeted && !entity.custom_name_visible {
+                        16.0
+                    } else {
+                        64.0
+                    };
+                    let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+                    let pos = interp_pos + glam::DVec3::Y * (height as f64 + 0.5);
+                    list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                        position: *pos,
+                        spans: spans.clone(),
+                        discrete: false,
+                        max_distance,
+                    });
+                } else if let Some(name) = &entity.custom_name {
+                    let is_targeted = target_entity_id == Some(entity_id);
+                    if !entity.custom_name_visible && !is_targeted {
+                        continue;
+                    }
+                    let max_distance = if is_targeted && !entity.custom_name_visible {
+                        16.0
+                    } else {
+                        64.0
+                    };
+                    let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+                    let pos = interp_pos + glam::DVec3::Y * (height as f64 + 0.5);
+                    let spans = vec![crate::ui::text::TextSpan::new(
+                        name.clone(),
+                        [1.0, 1.0, 1.0, 1.0],
+                    )];
+                    list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
+                        position: *pos,
+                        spans,
+                        discrete: false,
+                        max_distance,
+                    });
+                }
+            }
+            list
+        };
+
     let inventory = &game.player.inventory;
     let main_stack = &inventory.hotbar_slots()[core.input.selected_slot() as usize];
     let shown_hands = game
@@ -4820,6 +4865,7 @@ pub fn update_game(
         &block_entity_renders,
         &particle_quads,
         &sign_renders,
+        &nameplate_renders,
         &weather_columns,
         if no_ambience {
             crate::renderer::CloudMode::Off

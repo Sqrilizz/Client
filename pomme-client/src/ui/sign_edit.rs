@@ -1,48 +1,40 @@
 use crate::position::BlockPos;
-use crate::renderer::pipelines::menu_overlay::MenuElement;
+use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::common::{FONT_SIZE, WHITE, push_button, push_field_text, push_menu_background};
 use crate::ui::text::TextSpan;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 const MAX_SIGN_LINE_LENGTH: usize = 384;
-/// The sign panel's width in GUI units.
-const SIGN_W: f32 = 192.0;
-/// Horizontal padding inside the panel on each side.
-const SIGN_PAD: f32 = 8.0;
 
-/// The inner text width the line fields measure against, at this scale.
-pub fn line_inner_w(gs: f32) -> f32 {
-    (SIGN_W - 2.0 * SIGN_PAD) * gs
+pub fn line_inner_w(is_hanging: bool, gs: f32) -> f32 {
+    if is_hanging { 60.0 * gs } else { 90.0 * gs }
 }
 
 pub struct SignEditState {
     pub pos: BlockPos,
     pub is_front_text: bool,
+    pub is_hanging: bool,
+    pub is_wall: bool,
+    pub wood_index: u8,
     pub lines: [TextFieldState; 4],
     pub current_line: usize,
     inner_w: f32,
-    pub wood_color: [f32; 4],
     pub text_color: [f32; 4],
 }
 
-/// How the editor closed: `Submit` sends the current text as
-/// `sign_update`, `Cancel` just closes (server text stays).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SignEditResult {
-    Submit,
-    Cancel,
-}
-
 impl SignEditState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pos: BlockPos,
         is_front_text: bool,
+        is_hanging: bool,
+        is_wall: bool,
+        wood_index: u8,
         initial_lines: [String; 4],
-        wood_color: [f32; 4],
         text_color: [f32; 4],
         gs: f32,
     ) -> Self {
-        let inner_w = line_inner_w(gs);
+        let inner_w = line_inner_w(is_hanging, gs);
         let mut lines = [
             TextFieldState::new(MAX_SIGN_LINE_LENGTH),
             TextFieldState::new(MAX_SIGN_LINE_LENGTH),
@@ -50,19 +42,18 @@ impl SignEditState {
             TextFieldState::new(MAX_SIGN_LINE_LENGTH),
         ];
         for (i, text) in initial_lines.into_iter().enumerate() {
-            // A zero width fn keeps `display_pos` at the line start, so the
-            // panel opens with the text shown from its left edge (the render
-            // pass measures with the real width).
             lines[i].set_value(&text, inner_w, &|_| 0.0);
         }
         lines[0].set_focused(true);
         Self {
             pos,
             is_front_text,
+            is_hanging,
+            is_wall,
+            wood_index,
             lines,
             current_line: 0,
             inner_w,
-            wood_color,
             text_color,
         }
     }
@@ -138,97 +129,86 @@ impl SignEditState {
         cursor: (f32, f32),
         clicked: bool,
         width_fn: &dyn Fn(&str) -> f32,
-    ) -> Option<SignEditResult> {
+    ) -> bool {
         push_menu_background(elements, screen_w, screen_h);
 
-        let fs = FONT_SIZE * gs;
-        let title_y = ((screen_h / 4.0) - 20.0 * gs).max(10.0 * gs);
+        let title_text = if self.is_hanging {
+            "Edit Hanging Sign Message"
+        } else {
+            "Edit Sign Message"
+        };
         elements.push(MenuElement::Text {
             x: screen_w / 2.0,
-            y: title_y,
-            text: "Edit Sign Message".into(),
-            scale: fs,
+            y: 40.0 * gs,
+            text: title_text.into(),
+            scale: FONT_SIZE * gs,
             color: WHITE,
             centered: true,
         });
 
-        let sign_w = 192.0 * gs;
-        let sign_h = 96.0 * gs;
-        let sign_x = (screen_w - sign_w) / 2.0;
-        let sign_y = (screen_h - sign_h) / 2.0 - 15.0 * gs;
-
-        let outline_thick = 2.0 * gs;
-        let border_color = [
-            self.wood_color[0] * 0.45,
-            self.wood_color[1] * 0.45,
-            self.wood_color[2] * 0.45,
-            1.0,
-        ];
-
-        let post_w = 14.0 * gs;
-        let post_h = 24.0 * gs;
-        let post_x = (screen_w - post_w) / 2.0;
-        let post_y = sign_y + sign_h + outline_thick;
-        elements.push(MenuElement::Rect {
-            x: post_x,
-            y: post_y,
-            w: post_w,
-            h: post_h,
-            corner_radius: 0.0,
-            color: border_color,
-        });
-
-        elements.push(MenuElement::Rect {
-            x: sign_x - outline_thick,
-            y: sign_y - outline_thick,
-            w: sign_w + 2.0 * outline_thick,
-            h: sign_h + 2.0 * outline_thick,
-            corner_radius: 0.0,
-            color: border_color,
-        });
-
-        let plank_h = sign_h / 4.0;
-        for p in 0..4 {
-            let py = sign_y + (p as f32) * plank_h;
-            let shade = if p % 2 == 0 { 1.0 } else { 0.93 };
-            let plank_color = [
-                self.wood_color[0] * shade,
-                self.wood_color[1] * shade,
-                self.wood_color[2] * shade,
+        let (
+            sign_y_offset,
+            sprite,
+            sprite_w,
+            sprite_h,
+            sprite_x,
+            sprite_y,
+            src_rect,
+            text_scale,
+            inner_w,
+        ) = if self.is_hanging {
+            let w = 72.0 * gs;
+            let h = 72.0 * gs;
+            (
+                125.0 * gs,
+                SpriteId::HangingSign(self.wood_index),
+                w,
+                h,
+                (screen_w - w) / 2.0,
+                76.0 * gs,
+                [0.0, 0.0, 1.0, 1.0],
                 1.0,
-            ];
-            elements.push(MenuElement::Rect {
-                x: sign_x,
-                y: py,
-                w: sign_w,
-                h: plank_h,
-                corner_radius: 0.0,
-                color: plank_color,
-            });
-            if p > 0 {
-                elements.push(MenuElement::Rect {
-                    x: sign_x,
-                    y: py,
-                    w: sign_w,
-                    h: 1.0 * gs,
-                    corner_radius: 0.0,
-                    color: [0.0, 0.0, 0.0, 0.18],
-                });
-            }
-        }
+                60.0 * gs,
+            )
+        } else {
+            let w = 93.6 * gs;
+            let (h, src_rect) = if self.is_wall {
+                (46.8 * gs, [0.0, 0.0, 1.0, 12.0 / 26.0])
+            } else {
+                (101.4 * gs, [0.0, 0.0, 1.0, 1.0])
+            };
+            (
+                90.0 * gs,
+                SpriteId::Sign(self.wood_index),
+                w,
+                h,
+                (screen_w - w) / 2.0,
+                66.3 * gs,
+                src_rect,
+                0.9765628,
+                90.0 * gs,
+            )
+        };
 
-        let line_h = 18.0 * gs;
-        let lines_start_y = sign_y + (sign_h - 4.0 * line_h) / 2.0;
-        let inner_w = sign_w - 16.0 * gs;
+        elements.push(MenuElement::SubImage {
+            x: sprite_x,
+            y: sprite_y,
+            w: sprite_w,
+            h: sprite_h,
+            sprite,
+            src_rect,
+            tint: [1.0, 1.0, 1.0, 1.0],
+        });
+
+        let fs = FONT_SIZE * text_scale * gs;
+        let line_h = 10.0 * text_scale * gs;
+        let line_hit_x = screen_w / 2.0 - inner_w / 2.0;
+        let line_hit_w = inner_w;
 
         for i in 0..4 {
-            let line_y = lines_start_y + (i as f32) * line_h;
-            let line_hit_x = sign_x + 4.0 * gs;
-            let line_hit_w = sign_w - 8.0 * gs;
-
+            let line_y = sign_y_offset + (i as f32 * 10.0 - 20.0) * text_scale * gs;
             let text_w = width_fn(self.lines[i].value());
-            let text_x = sign_x + ((sign_w - text_w) / 2.0).max(8.0 * gs);
-            let text_y = line_y + (line_h - fs) / 2.0;
+            let text_x = screen_w / 2.0 - text_w / 2.0;
 
             if clicked
                 && cursor.0 >= line_hit_x
@@ -260,7 +240,7 @@ impl SignEditState {
                     shown,
                     Some(&spans),
                     text_x,
-                    text_y,
+                    line_y,
                     fs,
                     gs,
                     gs,
@@ -270,46 +250,43 @@ impl SignEditState {
                 );
                 elements.push(MenuElement::ScissorPop);
             } else if !val.is_empty() {
-                elements.push(MenuElement::Text {
+                elements.push(MenuElement::ScissorPush {
+                    x: line_hit_x,
+                    y: line_y,
+                    w: line_hit_w,
+                    h: line_h,
+                });
+                elements.push(MenuElement::TextFlat {
                     x: text_x,
-                    y: text_y,
+                    y: line_y,
                     text: val,
                     scale: fs,
                     color: self.text_color,
-                    centered: false,
                 });
+                elements.push(MenuElement::ScissorPop);
             }
         }
 
-        // Vanilla 1.20.5+: Done and Cancel side by side (98x20 each).
-        let btn_w = 98.0 * gs;
+        let btn_w = 200.0 * gs;
         let btn_h = 20.0 * gs;
-        let btn_gap = 4.0 * gs;
-        let pair_w = 2.0 * btn_w + btn_gap;
-        let btn_x = (screen_w - pair_w) / 2.0;
-        let btn_y = sign_y + sign_h + 30.0 * gs;
+        let btn_x = (screen_w - btn_w) / 2.0;
+        let btn_y = screen_h / 4.0 + 144.0 * gs;
         let done_hovered = push_button(
-            elements, cursor, btn_x, btn_y, btn_w, btn_h, gs, fs, "Done", true,
-        );
-        let cancel_hovered = push_button(
             elements,
             cursor,
-            btn_x + btn_w + btn_gap,
+            btn_x,
             btn_y,
             btn_w,
             btn_h,
             gs,
-            fs,
-            "Cancel",
+            FONT_SIZE * gs,
+            "Done",
             true,
         );
         if clicked && done_hovered {
-            return Some(SignEditResult::Submit);
+            return true;
         }
-        if clicked && cancel_hovered {
-            return Some(SignEditResult::Cancel);
-        }
-        None
+        false
     }
 
     pub fn lines_as_strings(&self) -> [String; 4] {

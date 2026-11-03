@@ -44,6 +44,7 @@ use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, SpriteId};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::sign_text::SignTextPipeline;
+use pipelines::nameplate::{NameplatePipeline, NameplateRenderInfo};
 use pipelines::post_effect::{PostEffect, PostEffects};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
@@ -208,6 +209,7 @@ enum RenderMode<'a> {
         block_entities: &'a [BlockEntityRenderInfo],
         particles: &'a [ParticleQuad],
         sign_texts: &'a [crate::world::block_entity::SignRenderInfo],
+        nameplates: &'a [NameplateRenderInfo],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -271,6 +273,7 @@ pub struct Renderer {
     particle_pipeline: ParticlePipeline,
     cloud_pipeline: CloudPipeline,
     sign_text_pipeline: SignTextPipeline,
+    nameplate_pipeline: NameplatePipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
     /// Force Unicode Font also evens the Auto GUI scale the item atlas is sized
@@ -438,6 +441,14 @@ impl Renderer {
             menu_pipeline.mc_font_sampler(),
         );
 
+        let nameplate_pipeline = NameplatePipeline::new(
+            &ctx.device,
+            swapchain_state.targets(),
+            menu_pipeline.mc_font_texture(),
+            menu_pipeline.mc_font_color_texture(),
+            menu_pipeline.mc_font_sampler(),
+        );
+
         splash(&mut menu_pipeline, 0.9, "Finalizing...");
 
         // Wide arms until the profile's skin (and its model flag) is fetched.
@@ -569,6 +580,7 @@ impl Renderer {
             particle_pipeline,
             cloud_pipeline,
             sign_text_pipeline,
+            nameplate_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
             font_options,
@@ -1068,6 +1080,8 @@ impl Renderer {
                 .recreate_pipeline(&self.ctx.device, targets);
             self.sign_text_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
+            self.nameplate_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
             self.cloud_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.chunk_border_pipeline
@@ -1185,9 +1199,6 @@ impl Renderer {
         if self.camera.mode == camera::CameraMode::FirstPerson || self.camera.top_down().is_some() {
             return;
         }
-        // TODO: vanilla `Camera.getMaxZoom` clips 8 rays offset by 0.1 against
-        // visual shapes with no minimum; this marches 0.2 steps against full
-        // cubes with a 0.4 pad and a 0.5 floor, so a distance of 0 sits 0.5 back.
         let max = max_distance as f64;
         let fwd = self.camera.render_look_dir().as_vec().as_dvec3();
         let dir = if self.camera.mode == camera::CameraMode::ThirdPersonFront {
@@ -1196,41 +1207,90 @@ impl Renderer {
             -fwd
         };
 
-        let mut dist = max;
+        let start_pos: glam::DVec3 = eye_pos.into();
+        let block_state_table = block_render.block_state_table();
+        let offsets = [-0.1, 0.1];
+        let mut min_dist = max;
 
-        let m = 0.4;
-        let corners = [
-            dvec3(m, m, m),
-            dvec3(m, m, -m),
-            dvec3(m, -m, m),
-            dvec3(m, -m, -m),
-            dvec3(-m, m, m),
-            dvec3(-m, m, -m),
-            dvec3(-m, -m, m),
-            dvec3(-m, -m, -m),
-        ];
+        for &ox in &offsets {
+            for &oy in &offsets {
+                for &oz in &offsets {
+                    let origin = start_pos + dvec3(ox, oy, oz);
+                    let reach_end = origin + dir * min_dist;
 
-        let step = 0.2;
-        let mut t = step;
-        while t <= max {
-            let p = eye_pos + dir * t;
-            let hit = corners.iter().any(|off| {
-                let check = p + *off;
-                let state = chunks.get_block_state(
-                    check.x.floor() as i32,
-                    check.y.floor() as i32,
-                    check.z.floor() as i32,
-                );
-                block_render.is_opaque_full_cube(state)
-            });
-            if hit {
-                dist = (t - 0.3).max(0.5);
-                break;
+                    let mut bx = origin.x.floor() as i32;
+                    let mut by = origin.y.floor() as i32;
+                    let mut bz = origin.z.floor() as i32;
+
+                    let step_x = if dir.x > 0.0 { 1 } else { -1 };
+                    let step_y = if dir.y > 0.0 { 1 } else { -1 };
+                    let step_z = if dir.z > 0.0 { 1 } else { -1 };
+
+                    let t_delta_x = if dir.x != 0.0 { (1.0 / dir.x).abs() } else { f64::INFINITY };
+                    let t_delta_y = if dir.y != 0.0 { (1.0 / dir.y).abs() } else { f64::INFINITY };
+                    let t_delta_z = if dir.z != 0.0 { (1.0 / dir.z).abs() } else { f64::INFINITY };
+
+                    let mut t_max_x = if dir.x > 0.0 {
+                        (bx as f64 + 1.0 - origin.x) * t_delta_x
+                    } else if dir.x < 0.0 {
+                        (origin.x - bx as f64) * t_delta_x
+                    } else {
+                        f64::INFINITY
+                    };
+                    let mut t_max_y = if dir.y > 0.0 {
+                        (by as f64 + 1.0 - origin.y) * t_delta_y
+                    } else if dir.y < 0.0 {
+                        (origin.y - by as f64) * t_delta_y
+                    } else {
+                        f64::INFINITY
+                    };
+                    let mut t_max_z = if dir.z > 0.0 {
+                        (bz as f64 + 1.0 - origin.z) * t_delta_z
+                    } else if dir.z < 0.0 {
+                        (origin.z - bz as f64) * t_delta_z
+                    } else {
+                        f64::INFINITY
+                    };
+
+                    let mut t = 0.0_f64;
+                    while t <= min_dist {
+                        let state = chunks.get_block_state(bx, by, bz);
+                        let block_state_data = block_state_table.block_state_data(state);
+                        if !block_state_data.is_air() {
+                            let outline = crate::physics::block_shape::outline_shape(block_state_data);
+                            let shape_offset = block_state_data.outline_shape_position(bx, by, bz);
+                            if let Some((hit_point, _)) = crate::player::interaction::clip_shape(
+                                origin,
+                                reach_end,
+                                shape_offset,
+                                outline,
+                            ) {
+                                let dist = hit_point.distance(origin);
+                                if dist < min_dist {
+                                    min_dist = dist;
+                                }
+                                break;
+                            }
+                        }
+                        if t_max_x < t_max_y && t_max_x < t_max_z {
+                            t = t_max_x;
+                            t_max_x += t_delta_x;
+                            bx += step_x;
+                        } else if t_max_y < t_max_z {
+                            t = t_max_y;
+                            t_max_y += t_delta_y;
+                            by += step_y;
+                        } else {
+                            t = t_max_z;
+                            t_max_z += t_delta_z;
+                            bz += step_z;
+                        }
+                    }
+                }
             }
-            t += step;
         }
 
-        self.camera.third_person_dist = dist.max(0.5) as f32;
+        self.camera.third_person_dist = min_dist as f32;
     }
 
     pub fn update_fov_mod(&mut self, modifier: f32) {
@@ -1447,6 +1507,7 @@ impl Renderer {
         block_entities: &[BlockEntityRenderInfo],
         particles: &[ParticleQuad],
         sign_texts: &[crate::world::block_entity::SignRenderInfo],
+        nameplates: &[pipelines::nameplate::NameplateRenderInfo],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -1505,6 +1566,7 @@ impl Renderer {
                 block_entities,
                 particles,
                 sign_texts,
+                nameplates,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -1623,6 +1685,12 @@ impl Renderer {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
         } else {
             self.sign_text_pipeline.rebind_font(
+                &self.ctx.device,
+                self.menu_pipeline.mc_font_texture(),
+                self.menu_pipeline.mc_font_color_texture(),
+                self.menu_pipeline.mc_font_sampler(),
+            );
+            self.nameplate_pipeline.rebind_font(
                 &self.ctx.device,
                 self.menu_pipeline.mc_font_texture(),
                 self.menu_pipeline.mc_font_color_texture(),
@@ -1835,6 +1903,7 @@ impl Renderer {
             self.weather_pipeline.update_camera(frame, &uniform);
             self.particle_pipeline.update_camera(frame, &uniform);
             self.sign_text_pipeline.update_camera(frame, &uniform);
+            self.nameplate_pipeline.update_camera(frame, &uniform);
             self.cloud_pipeline.update_camera(frame, &uniform);
         }
 
@@ -2015,7 +2084,7 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
-        if let RenderMode::World { particles, sign_texts, .. } = &mode {
+        if let RenderMode::World { particles, sign_texts, nameplates, .. } = &mode {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
             self.sign_text_pipeline.prepare(
@@ -2024,6 +2093,14 @@ impl Renderer {
                 self.camera_render_position(),
                 self.menu_pipeline.mc_glyph_map(),
                 sign_texts,
+            );
+            self.nameplate_pipeline.prepare(
+                frame,
+                &self.camera,
+                self.camera_render_position(),
+                self.camera.anchor(),
+                self.menu_pipeline.mc_glyph_map(),
+                nameplates,
             );
         }
         let pack_drawn = self.render_pack_world(&encoder, frame, &mode);
@@ -2062,6 +2139,7 @@ impl Renderer {
                 block_entities,
                 particles: _,
                 sign_texts: _,
+                nameplates: _,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -2195,6 +2273,7 @@ impl Renderer {
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(&mut pass, frame);
                     }
+                    self.nameplate_pipeline.draw(&mut pass, frame);
                     cull_ms
                 };
 
@@ -2774,6 +2853,7 @@ impl Drop for Renderer {
         self.weather_pipeline.destroy(&self.ctx.device);
         self.particle_pipeline.destroy(&self.ctx.device);
         self.sign_text_pipeline.destroy(&self.ctx.device);
+        self.nameplate_pipeline.destroy(&self.ctx.device);
         self.cloud_pipeline.destroy(&self.ctx.device);
         self.gui_item_pipeline.destroy(&self.ctx.device);
         self.gui_item_atlas.destroy(&self.ctx.device);

@@ -1981,7 +1981,7 @@ const INSIDE_PROBE_FRACTION: f64 = 0.001;
 /// never hit, so the caller walks on to the next block. Vanilla's
 /// degenerate-ray guard is dropped; `raycast` always passes a scaled unit
 /// direction.
-fn clip_shape(
+pub(crate) fn clip_shape(
     from: DVec3,
     to: DVec3,
     offset: DVec3,
