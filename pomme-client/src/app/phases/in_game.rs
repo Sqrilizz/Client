@@ -740,14 +740,14 @@ impl GameState {
         let Some(passengers) = self.vehicle_passengers.get(&vehicle_id).cloned() else {
             return;
         };
-        let (vehicle_pos, vehicle_yaw, vehicle_kind, height) =
+        let (vehicle_pos, vehicle_yaw, vehicle_kind, height, vehicle_on_ground) =
             if let Some(e) = self.entity_store.living.get(&vehicle_id) {
                 let h = crate::entity::dimensions::EntityDimensions::of(e.entity_type).height;
-                (*e.position, e.body_y_rot_deg, e.entity_type, h)
+                (*e.position, e.body_y_rot_deg, e.entity_type, h, e.on_ground)
             } else if let Some(pos) = self.entity_positions.get(&vehicle_id) {
                 let kind = self.entity_kinds.get(&vehicle_id).copied().unwrap_or(EntityKind::ArmorStand);
                 let h = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                (**pos, 0.0, kind, h)
+                (**pos, 0.0, kind, h, false)
             } else {
                 return;
             };
@@ -759,6 +759,7 @@ impl GameState {
                 self.player.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
                 self.player.prev_position = self.player.position;
                 self.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+                self.player.on_ground = vehicle_on_ground;
             }
             if let Some(display) = self.text_display_store.get_mut(passenger_id) {
                 display.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);

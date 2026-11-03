@@ -2647,15 +2647,17 @@ impl AppCore {
                     dz,
                     on_ground,
                 } => {
-                    game.entity_store
-                        .move_living_delta(id, dx, dy, dz, on_ground);
-                    game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                    game.text_display_store.move_delta(id, dx, dy, dz);
-                    if let Some(pos) = game.entity_positions.get_mut(&id) {
-                        *pos += dvec3(dx, dy, dz);
-                        self.audio.update_entity_sound_position(id, *pos);
+                    if game.controlled_vehicle_id != Some(id) {
+                        game.entity_store
+                            .move_living_delta(id, dx, dy, dz, on_ground);
+                        game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        game.text_display_store.move_delta(id, dx, dy, dz);
+                        if let Some(pos) = game.entity_positions.get_mut(&id) {
+                            *pos += dvec3(dx, dy, dz);
+                            self.audio.update_entity_sound_position(id, *pos);
+                        }
+                        game.sync_passengers(id);
                     }
-                    game.sync_passengers(id);
                 }
                 NetworkEvent::EntityMovedRotated {
                     id,
@@ -2666,17 +2668,19 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    game.entity_store
-                        .move_living_delta(id, dx, dy, dz, on_ground);
-                    game.entity_store
-                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
-                    game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
-                    game.text_display_store.move_delta(id, dx, dy, dz);
-                    if let Some(pos) = game.entity_positions.get_mut(&id) {
-                        *pos += dvec3(dx, dy, dz);
-                        self.audio.update_entity_sound_position(id, *pos);
+                    if game.controlled_vehicle_id != Some(id) {
+                        game.entity_store
+                            .move_living_delta(id, dx, dy, dz, on_ground);
+                        game.entity_store
+                            .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        game.text_display_store.move_delta(id, dx, dy, dz);
+                        if let Some(pos) = game.entity_positions.get_mut(&id) {
+                            *pos += dvec3(dx, dy, dz);
+                            self.audio.update_entity_sound_position(id, *pos);
+                        }
+                        game.sync_passengers(id);
                     }
-                    game.sync_passengers(id);
                 }
                 NetworkEvent::EntityRotated {
                     id,
@@ -2684,15 +2688,15 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
-                    game.entity_store
-                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                    if game.controlled_vehicle_id != Some(id) {
+                        game.entity_store
+                            .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                    }
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
-                    // Vanilla `Entity.lerpMotion` sets velocity; the local
-                    // player lives outside the entity stores.
                     if id == game.player.entity_id {
                         game.player.velocity = velocity.into();
-                    } else {
+                    } else if game.controlled_vehicle_id != Some(id) {
                         game.item_entity_store.set_motion(id, velocity);
                         game.entity_store.set_living_motion(id, velocity);
                     }
@@ -3549,9 +3553,8 @@ impl AppCore {
                 }
             }
             if p.was_jump_pressed && !jump_held {
+                let power = (p.jump_riding_scale * 100.0).floor() as u32;
                 p.jump_riding_ticks = -10;
-                // Vanilla also calls vehicle.onPlayerJump() for client horse
-                // physics; pomme has no vehicle physics, the server moves us.
                 use azalea_protocol::packets::game::s_player_command as cmd;
                 connection
                     .packet_tx
@@ -3559,9 +3562,27 @@ impl AppCore {
                         cmd::ServerboundPlayerCommand {
                             id: azalea_core::entity_id::MinecraftEntityId(p.entity_id),
                             action: cmd::Action::StartRidingJump,
-                            data: (p.jump_riding_scale * 100.0).floor() as u32,
+                            data: power,
                         },
                     ));
+                if let Some(vid) = game.controlled_vehicle_id {
+                    if let Some(v) = game.entity_store.living.get_mut(&vid) {
+                        if v.on_ground {
+                            let jump_strength = v
+                                .attributes
+                                .value(crate::attribute::AttributeKind::JumpStrength)
+                                .unwrap_or(0.7);
+                            let scale = if power >= 90 {
+                                1.0
+                            } else {
+                                0.4 + 0.4 * (power as f64) / 90.0
+                            };
+                            v.velocity.y = jump_strength * scale;
+                            v.on_ground = false;
+                        }
+                    }
+                }
+                p.jump_riding_scale = 0.0;
             } else if !p.was_jump_pressed && jump_held {
                 p.jump_riding_ticks = 0;
                 p.jump_riding_scale = 0.0;
@@ -3688,7 +3709,7 @@ impl AppCore {
             game.interaction.slow_due_to_using_item(),
             vehicle,
         );
-        Self::tick_controlled_vehicle(game, input);
+        Self::tick_controlled_vehicle(game, input, connection);
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
@@ -3823,7 +3844,11 @@ impl AppCore {
         );
     }
 
-    fn tick_controlled_vehicle(game: &mut GameState, input: &InputState) {
+    fn tick_controlled_vehicle(
+        game: &mut GameState,
+        input: &InputState,
+        connection: &ConnectionHandle,
+    ) {
         let Some(vehicle_id) = game.controlled_vehicle_id else {
             return;
         };
@@ -3859,27 +3884,27 @@ impl AppCore {
                 .value(crate::attribute::AttributeKind::MovementSpeed)
                 .unwrap_or(0.225);
 
+            let friction = 0.6f64;
+            let f = if vehicle.on_ground { friction * 0.91 } else { 0.91 };
+            let f1 = if vehicle.on_ground {
+                speed * (0.21600002 / (f * f * f))
+            } else {
+                speed * 0.1
+            };
+
             let yaw_rad = (player_yaw as f64).to_radians();
             let sin_yaw = yaw_rad.sin();
             let cos_yaw = yaw_rad.cos();
-            if forward != 0.0 || strafe != 0.0 {
-                let target_dx = (-sin_yaw * forward + cos_yaw * strafe) * speed;
-                let target_dz = (cos_yaw * forward + sin_yaw * strafe) * speed;
-                let accel = if vehicle.on_ground { 0.15 } else { 0.05 };
-                vehicle.velocity.x += (target_dx - vehicle.velocity.x) * accel;
-                vehicle.velocity.z += (target_dz - vehicle.velocity.z) * accel;
+            let input_dist = (strafe * strafe + forward * forward).sqrt();
+            if input_dist >= 1e-4 {
+                let norm = f1 / input_dist.max(1.0);
+                let s = strafe * norm;
+                let fw = forward * norm;
+                vehicle.velocity.x += s * cos_yaw - fw * sin_yaw;
+                vehicle.velocity.z += fw * cos_yaw + s * sin_yaw;
             }
 
-            if vehicle.on_ground {
-                if input.performing_action(Action::Jump) {
-                    let jump_strength = vehicle
-                        .attributes
-                        .value(crate::attribute::AttributeKind::JumpStrength)
-                        .unwrap_or(0.7);
-                    vehicle.velocity.y = jump_strength * 0.85;
-                    vehicle.on_ground = false;
-                }
-            } else {
+            if !vehicle.on_ground {
                 vehicle.velocity.y -= 0.08;
                 vehicle.velocity.y *= 0.98;
             }
@@ -3916,16 +3941,26 @@ impl AppCore {
             vehicle.position.x += movement_step.x;
             vehicle.position.y += movement_step.y;
             vehicle.position.z += movement_step.z;
+            let was_in_air = !vehicle.on_ground;
             vehicle.on_ground = on_ground;
 
             if on_ground {
                 vehicle.velocity.y = 0.0;
-                vehicle.velocity.x *= 0.6;
-                vehicle.velocity.z *= 0.6;
-            } else {
-                vehicle.velocity.x *= 0.91;
-                vehicle.velocity.z *= 0.91;
+                if was_in_air {
+                    use azalea_protocol::packets::game::s_player_command as cmd;
+                    connection
+                        .packet_tx
+                        .send(azalea_protocol::packets::game::ServerboundGamePacket::PlayerCommand(
+                            cmd::ServerboundPlayerCommand {
+                                id: azalea_core::entity_id::MinecraftEntityId(game.player.entity_id),
+                                action: cmd::Action::StopRidingJump,
+                                data: 0,
+                            },
+                        ));
+                }
             }
+            vehicle.velocity.x *= f;
+            vehicle.velocity.z *= f;
 
             let dx = vehicle.position.x - vehicle.prev_position.x;
             let dz = vehicle.position.z - vehicle.prev_position.z;
@@ -4033,7 +4068,7 @@ impl AppCore {
         if let Some(vehicle_id) = game.controlled_vehicle_id {
             if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
                 let flags = MoveFlags {
-                    on_ground: game.player.on_ground,
+                    on_ground: vehicle.on_ground,
                     horizontal_collision: game.player.horizontal_collision,
                 };
                 sender.send(ServerboundGamePacket::MovePlayerRot(
