@@ -1272,6 +1272,26 @@ fn mob_definitions() -> Vec<MobDef> {
     const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/baby");
     const VILLAGER_PROFESSION_TEX: &[&[&str]] = villager_profession_table!("villager/profession");
     const VILLAGER_LEVEL_TEX: &[&[&str]] = villager_level_table!("villager/profession_level");
+    const OAK_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "oak");
+    const SPRUCE_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "spruce");
+    const BIRCH_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "birch");
+    const JUNGLE_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "jungle");
+    const ACACIA_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "acacia");
+    const CHERRY_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "cherry");
+    const DARK_OAK_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "dark_oak");
+    const MANGROVE_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "mangrove");
+    const PALE_OAK_BOAT_TEX: &[&[&str]] = tex_table!("boat" => "pale_oak");
+    const BAMBOO_RAFT_TEX: &[&[&str]] = tex_table!("boat" => "bamboo");
+    const OAK_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "oak");
+    const SPRUCE_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "spruce");
+    const BIRCH_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "birch");
+    const JUNGLE_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "jungle");
+    const ACACIA_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "acacia");
+    const CHERRY_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "cherry");
+    const DARK_OAK_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "dark_oak");
+    const MANGROVE_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "mangrove");
+    const PALE_OAK_CHEST_BOAT_TEX: &[&[&str]] = tex_table!("chest_boat" => "pale_oak");
+    const BAMBOO_CHEST_RAFT_TEX: &[&[&str]] = tex_table!("chest_boat" => "bamboo");
 
     // Base and baby models, plus opaque overlays (sheep wool), are all Opaque.
     fn opaque(
@@ -2204,6 +2224,166 @@ fn mob_definitions() -> Vec<MobDef> {
                 IRON_GOLEM_CRACKINESS_TEX,
                 128,
             )],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::OakBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), OAK_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::SpruceBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), SPRUCE_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::BirchBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), BIRCH_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::JungleBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), JUNGLE_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::AcaciaBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), ACACIA_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::CherryBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), CHERRY_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::DarkOakBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), DARK_OAK_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::MangroveBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), MANGROVE_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::PaleOakBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_boat_model(), PALE_OAK_BOAT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::BambooRaft,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_raft_model(), BAMBOO_RAFT_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::OakChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), OAK_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::SpruceChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), SPRUCE_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::BirchChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), BIRCH_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::JungleChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), JUNGLE_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::AcaciaChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), ACACIA_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::CherryChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), CHERRY_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::DarkOakChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), DARK_OAK_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::MangroveChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), MANGROVE_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::PaleOakChestBoat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_boat_model(), PALE_OAK_CHEST_BOAT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::BambooChestRaft,
+            anim: AnimationType::Static,
+            adult: vec![opaque(entity_model::bake_chest_raft_model(), BAMBOO_CHEST_RAFT_TEX, 128)],
+            baby: None,
+            adult_overlays: vec![],
             baby_overlays: vec![],
         },
     ]

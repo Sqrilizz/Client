@@ -1,7 +1,4 @@
-pub fn is_boat(kind: EntityKind) -> bool {
-    let s = kind.to_str();
-    s.ends_with("_boat") || s.ends_with("_raft")
-}
+pub use crate::entity::is_boat;
 
 pub fn is_minecart(kind: EntityKind) -> bool {
     let s = kind.to_str();
@@ -20,12 +17,12 @@ pub fn passenger_attachment_offset(
 
     if is_boat(kind) {
         let seat_dist = if seat_index == 0 { 0.2 } else { -0.6 };
-        glam::DVec3::new(fx * seat_dist, 0.45 - 0.35, fz * seat_dist)
+        glam::DVec3::new(fx * seat_dist, (height as f64) / 3.0, fz * seat_dist)
     } else if is_minecart(kind) {
         glam::DVec3::new(0.0, -0.35, 0.0)
     } else {
         match kind {
-            EntityKind::ArmorStand => glam::DVec3::new(0.0, 0.0, 0.0),
+            EntityKind::ArmorStand => glam::DVec3::new(0.0, -0.75, 0.0),
             EntityKind::Horse | EntityKind::SkeletonHorse | EntityKind::ZombieHorse => {
                 glam::DVec3::new(0.0, (height as f64) * 0.75 - 0.35, 0.0)
             }
@@ -2971,7 +2968,7 @@ pub fn update_game(
     let camera_pivot = match spectated {
         Some(e) => e.eye_position(partial_tick),
         None => {
-            let rider_feet = if let Some(vehicle_id) = game.riding_vehicle_id {
+            let (rider_feet, vehicle_is_boat) = if let Some(vehicle_id) = game.riding_vehicle_id {
                 let seat_idx = game
                     .vehicle_passengers
                     .get(&vehicle_id)
@@ -2981,18 +2978,19 @@ pub fn update_game(
                     let v_pos = vehicle.prev_position.lerp(vehicle.position, partial_tick as f64);
                     let v_yaw = lerp_angle(vehicle.prev_body_y_rot_deg, vehicle.body_y_rot_deg, partial_tick);
                     let height = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
-                    Some(v_pos + passenger_attachment_offset(vehicle.entity_type, height, seat_idx, v_yaw))
+                    (Some(v_pos + passenger_attachment_offset(vehicle.entity_type, height, seat_idx, v_yaw)), is_boat(vehicle.entity_type))
                 } else if let Some(pos) = game.entity_positions.get(&vehicle_id) {
                     let kind = game.entity_kinds.get(&vehicle_id).copied().unwrap_or(EntityKind::ArmorStand);
                     let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                    Some(*pos + passenger_attachment_offset(kind, height, seat_idx, 0.0))
+                    (Some(*pos + passenger_attachment_offset(kind, height, seat_idx, 0.0)), is_boat(kind))
                 } else {
-                    None
+                    (None, false)
                 }
             } else {
-                None
+                (None, false)
             };
             let eye = match rider_feet {
+                Some(feet) if vehicle_is_boat => feet + glam::dvec3(0.0, 1.27, 0.0),
                 Some(feet) => feet + glam::dvec3(0.0, f64::from(game.player.eye_height), 0.0),
                 None => game
                     .player
@@ -4837,6 +4835,16 @@ pub fn update_game(
                 Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
                 _ => None,
             };
+            let passenger_map: HashMap<i32, (i32, usize)> = game
+                .vehicle_passengers
+                .iter()
+                .flat_map(|(&vid, passengers)| {
+                    passengers
+                        .iter()
+                        .enumerate()
+                        .map(move |(idx, &pid)| (pid, (vid, idx)))
+                })
+                .collect();
             let mut list = Vec::new();
             for (&entity_id, entity) in &game.entity_store.living {
                 if entity.sleeping_pos.is_some() {
@@ -4850,8 +4858,22 @@ pub fn update_game(
                 }
                 let extras =
                     entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64);
-                let interp_pos =
-                    entity.prev_position.lerp(entity.position, partial_tick as f64) + extras.render_offset;
+                let interp_pos = if let Some(&(vid, seat_idx)) = passenger_map.get(&entity_id) {
+                    if let Some(vehicle) = game.entity_store.living.get(&vid) {
+                        let v_pos = vehicle.prev_position.lerp(vehicle.position, partial_tick as f64);
+                        let v_yaw = lerp_angle(vehicle.prev_body_y_rot_deg, vehicle.body_y_rot_deg, partial_tick);
+                        let height = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
+                        v_pos + passenger_attachment_offset(vehicle.entity_type, height, seat_idx, v_yaw)
+                    } else if let Some(pos) = game.entity_positions.get(&vid) {
+                        let kind = game.entity_kinds.get(&vid).copied().unwrap_or(EntityKind::ArmorStand);
+                        let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
+                        *pos + passenger_attachment_offset(kind, height, seat_idx, 0.0)
+                    } else {
+                        entity.prev_position.lerp(entity.position, partial_tick as f64)
+                    }
+                } else {
+                    entity.prev_position.lerp(entity.position, partial_tick as f64)
+                } + extras.render_offset;
                 if let Some(uuid) = entity.player_uuid {
                     if uuid == core.user.uuid {
                         continue;

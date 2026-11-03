@@ -1603,6 +1603,10 @@ impl LivingEntity {
     // `getMaxHeadYRot` (75 by default, 15 for a goat, 1 for an axolotl), and
     // turns to face the head after it holds still for 10 ticks.
     pub fn tick_body_rotation(&mut self) {
+        if is_boat(self.entity_type) {
+            self.body_y_rot_deg = self.look_dir.y_rot_deg();
+            return;
+        }
         let dx = self.position.x - self.prev_position.x;
         let dz = self.position.z - self.prev_position.z;
         let dist_sq = (dx * dx + dz * dz) as f32;
@@ -2529,12 +2533,18 @@ pub fn is_equine(kind: &EntityKind) -> bool {
 
 /// Vanilla `Llama` and its `TraderLlama` subclass: `AbstractHorse`s that
 /// pomme renders apart from the horse family.
+pub fn is_boat(kind: EntityKind) -> bool {
+    let s = kind.to_str();
+    s.ends_with("_boat") || s.ends_with("_raft")
+}
+
 pub fn is_llama(kind: EntityKind) -> bool {
     matches!(kind, EntityKind::Llama | EntityKind::TraderLlama)
 }
 
 pub fn is_living_mob(kind: &EntityKind) -> bool {
-    is_equine(kind)
+    is_boat(*kind)
+        || is_equine(kind)
         || is_llama(*kind)
         || matches!(
             kind,
