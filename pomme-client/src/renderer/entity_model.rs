@@ -4004,25 +4004,30 @@ pub fn compute_humanoid_anim(
     walk_pos: f32,
     walk_speed: f32,
     is_crouching: bool,
+    is_sitting: bool,
 ) -> PartAnim {
     let mut anim = PartAnim::default();
-    let crouch_arm_rot = if is_crouching { 0.4 } else { 0.0 };
+    let crouch_arm_rot = if is_crouching && !is_sitting { 0.4 } else { 0.0 };
+    let sitting_arm_rot = if is_sitting { -std::f32::consts::PI / 5.0 } else { 0.0 };
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
             "head" => head_rotation(head_x_rot_deg, local_head_y_rot_deg),
-            "body" if is_crouching => Vec3::new(0.5, 0.0, 0.0),
+            "body" if is_crouching && !is_sitting => Vec3::new(0.5, 0.0, 0.0),
             "right_arm" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 2.0 * walk_speed * 0.5
-                    + crouch_arm_rot,
+                    + crouch_arm_rot
+                    + sitting_arm_rot,
                 0.0,
                 0.0,
             ),
             "left_arm" => Vec3::new(
-                (walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5 + crouch_arm_rot,
+                (walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5 + crouch_arm_rot + sitting_arm_rot,
                 0.0,
                 0.0,
             ),
+            "right_leg" if is_sitting => Vec3::new(-1.4137167, std::f32::consts::PI / 10.0, 0.07853982),
+            "left_leg" if is_sitting => Vec3::new(-1.4137167, -std::f32::consts::PI / 10.0, -0.07853982),
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
             "left_leg" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 1.4 * walk_speed,
@@ -4031,7 +4036,7 @@ pub fn compute_humanoid_anim(
             ),
             _ => continue,
         };
-        if is_crouching {
+        if is_crouching && !is_sitting {
             let translation = match part.name.as_str() {
                 "head" => Vec3::new(0.0, 4.2, 0.0),
                 "body" | "right_arm" | "left_arm" => Vec3::new(0.0, 3.2, 0.0),
@@ -4179,6 +4184,7 @@ pub fn compute_zombie_anim(
     aggressive: bool,
     age_in_ticks: f32,
     attack_time: f32,
+    is_sitting: bool,
 ) -> PartAnim {
     use std::f32::consts::PI;
     let mut anim = PartAnim::default();
@@ -4200,6 +4206,8 @@ pub fn compute_zombie_anim(
                 let (bx, bz) = bob_arm(age_in_ticks, -1.0);
                 Vec3::new(arm_drop + arm_swing_x + bx, 0.1 - attack_y * 0.6, bz)
             }
+            "right_leg" if is_sitting => Vec3::new(-1.4137167, PI / 10.0, 0.07853982),
+            "left_leg" if is_sitting => Vec3::new(-1.4137167, -PI / 10.0, -0.07853982),
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
             "left_leg" => Vec3::new((walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed, 0.0, 0.0),
             _ => continue,
@@ -4417,6 +4425,7 @@ pub fn compute_copper_golem_anim(
 // TODO: aim pose is hardcoded right-handed and gated on `aggressive` alone;
 // vanilla keys it off the main arm and a held bow. Implement once held items
 // are rendered.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_skeleton_anim(
     model: &BakedEntityModel,
     head_x_rot_deg: f32,
@@ -4425,11 +4434,13 @@ pub fn compute_skeleton_anim(
     walk_speed: f32,
     aggressive: bool,
     _age_in_ticks: f32,
+    is_sitting: bool,
 ) -> PartAnim {
     use std::f32::consts::{FRAC_PI_2, PI};
     let mut anim = PartAnim::default();
     let head_x = head_x_rot_deg.to_radians();
     let head_y = local_head_y_rot_deg.to_radians();
+    let sitting_arm_rot = if is_sitting && !aggressive { -PI / 5.0 } else { 0.0 };
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
@@ -4439,11 +4450,13 @@ pub fn compute_skeleton_anim(
             "right_arm" if aggressive => Vec3::new(-FRAC_PI_2 + head_x, -0.1 + head_y, 0.0),
             "left_arm" if aggressive => Vec3::new(-FRAC_PI_2 + head_x, 0.1 + head_y + 0.4, 0.0),
             "right_arm" => Vec3::new(
-                (walk_pos * 0.6662 + PI).cos() * 2.0 * walk_speed * 0.5,
+                (walk_pos * 0.6662 + PI).cos() * 2.0 * walk_speed * 0.5 + sitting_arm_rot,
                 0.0,
                 0.0,
             ),
-            "left_arm" => Vec3::new((walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5, 0.0, 0.0),
+            "left_arm" => Vec3::new((walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5 + sitting_arm_rot, 0.0, 0.0),
+            "right_leg" if is_sitting => Vec3::new(-1.4137167, PI / 10.0, 0.07853982),
+            "left_leg" if is_sitting => Vec3::new(-1.4137167, -PI / 10.0, -0.07853982),
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
             "left_leg" => Vec3::new((walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed, 0.0, 0.0),
             _ => continue,
@@ -4506,6 +4519,7 @@ pub fn compute_spider_anim(
 /// pose in the default rotation). When unhappy the head shakes "no" and looks
 /// down (vanilla `VillagerModel.setupAnim`). Part names are shared by the
 /// adult and baby models.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_villager_anim(
     model: &BakedEntityModel,
     head_x_rot_deg: f32,
@@ -4514,6 +4528,7 @@ pub fn compute_villager_anim(
     walk_speed: f32,
     is_unhappy: bool,
     age_in_ticks: f32,
+    is_sitting: bool,
 ) -> PartAnim {
     let mut anim = PartAnim::default();
 
@@ -4531,6 +4546,8 @@ pub fn compute_villager_anim(
                     head_rotation(head_x_rot_deg, local_head_y_rot_deg)
                 }
             }
+            "right_leg" if is_sitting => Vec3::new(-1.4137167, std::f32::consts::PI / 10.0, 0.07853982),
+            "left_leg" if is_sitting => Vec3::new(-1.4137167, -std::f32::consts::PI / 10.0, -0.07853982),
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed * 0.5, 0.0, 0.0),
             "left_leg" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 1.4 * walk_speed * 0.5,
@@ -4610,6 +4627,7 @@ pub fn compute_witch_anim(
     age_in_ticks: f32,
     nose_wobble_speed: f32,
     is_holding_item: bool,
+    is_sitting: bool,
 ) -> PartAnim {
     let mut anim = compute_villager_anim(
         model,
@@ -4619,6 +4637,7 @@ pub fn compute_witch_anim(
         walk_speed,
         false,
         age_in_ticks,
+        is_sitting,
     );
 
     for (i, part) in model.parts.iter().enumerate() {

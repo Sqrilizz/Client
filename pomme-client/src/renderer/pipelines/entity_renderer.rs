@@ -2599,6 +2599,7 @@ impl EntityRenderer {
                 info.walk_anim_pos,
                 info.walk_anim_speed,
                 info.is_crouching,
+                info.is_sitting,
             ),
             AnimationType::Enderman => entity_model::compute_enderman_anim(
                 model,
@@ -2618,6 +2619,7 @@ impl EntityRenderer {
                 info.aggressive,
                 info.age_in_ticks,
                 info.attack_time,
+                info.is_sitting,
             ),
             AnimationType::Skeleton => entity_model::compute_skeleton_anim(
                 model,
@@ -2627,6 +2629,7 @@ impl EntityRenderer {
                 info.walk_anim_speed,
                 info.aggressive,
                 info.age_in_ticks,
+                info.is_sitting,
             ),
             AnimationType::Spider => entity_model::compute_spider_anim(
                 model,
@@ -2643,6 +2646,7 @@ impl EntityRenderer {
                 info.walk_anim_speed,
                 info.is_unhappy,
                 info.age_in_ticks,
+                info.is_sitting,
             ),
             AnimationType::Witch => entity_model::compute_witch_anim(
                 model,
@@ -2653,6 +2657,7 @@ impl EntityRenderer {
                 info.age_in_ticks,
                 info.nose_wobble_speed,
                 info.is_holding_item,
+                info.is_sitting,
             ),
             AnimationType::Wolf => entity_model::compute_wolf_anim(
                 model,

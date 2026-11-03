@@ -2613,6 +2613,7 @@ impl AppCore {
                     head_y_rot_deg,
                 } => {
                     game.entity_positions.insert(id, position);
+                    game.entity_kinds.insert(id, entity_type);
                     game.silent_entities.remove(&id);
                     if crate::entity::is_living_mob(&entity_type) {
                         game.entity_store.spawn_living(
@@ -2772,6 +2773,7 @@ impl AppCore {
                             self.remove_player_skin(renderer, &uuid);
                         }
                         game.entity_positions.remove(id);
+                        game.entity_kinds.remove(id);
                         game.silent_entities.remove(id);
                         self.audio.stop_entity_sounds(*id);
                     }
@@ -2785,6 +2787,9 @@ impl AppCore {
                     }
                     for id in &ids {
                         game.vehicle_passengers.remove(id);
+                    }
+                    for passengers in game.vehicle_passengers.values_mut() {
+                        passengers.retain(|p| !ids.contains(p));
                     }
                 }
                 NetworkEvent::EntityHeadRotation {
@@ -3117,6 +3122,7 @@ impl AppCore {
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
                     game.text_display_store = crate::entity::TextDisplayStore::new();
                     game.entity_positions.clear();
+                    game.entity_kinds.clear();
                     game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
