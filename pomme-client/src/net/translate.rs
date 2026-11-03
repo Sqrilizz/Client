@@ -538,6 +538,8 @@ struct Ids774 {
 /// 768 need.
 struct Ids768 {
     level_particles_id: u32,
+    move_vehicle_id: u32,
+    move_vehicle_old_id: u32,
 }
 
 impl Ids768 {
@@ -1410,6 +1412,11 @@ impl Translation {
                 return translate_chat_command_765(v765.chat_command_old_id, &frame[pos..]);
             }
         }
+        if let Some(v768) = &ids.v768 {
+            if id == v768.move_vehicle_id {
+                return strip_last_byte(v768.move_vehicle_old_id, &frame[pos..]);
+            }
+        }
         if let Some(v769) = &ids.v769 {
             if id == v769.chat_id {
                 return strip_last_byte(v769.chat_old_id, &frame[pos..]);
@@ -1743,6 +1750,13 @@ impl GameIds {
             }),
             v768: (protocol <= 768).then(|| Ids768 {
                 level_particles_id: id(Clientbound, "level_particles"),
+                move_vehicle_id: id(Serverbound, "move_vehicle"),
+                move_vehicle_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "move_vehicle",
+                ),
             }),
             v767: (protocol <= 767).then(|| Ids767 {
                 player_position_id: id(Clientbound, "player_position"),

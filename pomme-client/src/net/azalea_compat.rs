@@ -4847,6 +4847,34 @@ fn translate_outbound_777() {
     assert!(translation_for(775).reports_use_swings());
 }
 
+#[test]
+fn translate_move_vehicle_across_versions() {
+    let native = pomme_protocol::wire::encode_move_vehicle(
+        glam::dvec3(10.0, 64.0, -20.0),
+        90.0,
+        15.0,
+        true,
+    );
+    assert_eq!(native.len(), 34);
+
+    let frames_769 = translation_for(769).translate_outbound_game_frame(native.clone());
+    assert_eq!(frames_769.len(), 1);
+    assert_eq!(frames_769[0][0], 32);
+    assert_eq!(frames_769[0].len(), 34);
+    assert_eq!(&frames_769[0][1..], &native[1..]);
+
+    let frames_767 = translation_for(767).translate_outbound_game_frame(native.clone());
+    assert_eq!(frames_767.len(), 1);
+    assert_eq!(frames_767[0][0], 30);
+    assert_eq!(frames_767[0].len(), 33);
+    assert_eq!(&frames_767[0][1..], &native[1..33]);
+
+    let frames_765 = translation_for(765).translate_outbound_game_frame(native);
+    assert_eq!(frames_765.len(), 1);
+    assert_eq!(frames_765[0][0], 27);
+    assert_eq!(frames_765[0].len(), 33);
+}
+
 /// 26.3 writes light masks with `ByteBufCodecs.BIT_SET` (a varint byte
 /// count, `BitSet.toByteArray`'s little-endian bytes) where 26.2 reads a
 /// long array; the rest of the light data and the chunk data are unchanged.

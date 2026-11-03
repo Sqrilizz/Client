@@ -4042,18 +4042,11 @@ impl AppCore {
                         flags,
                     },
                 ));
-                sender.send(ServerboundGamePacket::MoveVehicle(
-                    s_move_vehicle::ServerboundMoveVehicle {
-                        pos: azalea_core::position::Vec3 {
-                            x: vehicle.position.x,
-                            y: vehicle.position.y,
-                            z: vehicle.position.z,
-                        },
-                        look_direction: azalea_entity::LookDirection::new(
-                            vehicle.body_y_rot_deg,
-                            vehicle.look_dir.x_rot_deg(),
-                        ),
-                    },
+                sender.send_raw(pomme_protocol::wire::encode_move_vehicle(
+                    *vehicle.position,
+                    vehicle.body_y_rot_deg,
+                    vehicle.look_dir.x_rot_deg(),
+                    vehicle.on_ground,
                 ));
                 return;
             }
