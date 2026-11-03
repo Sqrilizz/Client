@@ -4542,6 +4542,8 @@ pub fn update_game(
                     allay: extras.allay,
                     copper_golem: extras.copper_golem,
                     llama_decor: extras.llama_decor,
+                    horse_armor: extras.horse_armor,
+                    horse_saddle: extras.horse_saddle,
                     bee: extras.bee,
                     fox: extras.fox,
                     axolotl: extras.axolotl,
@@ -5606,6 +5608,8 @@ struct EntityExtras {
     allay: crate::renderer::entity_model::AllayAnims,
     copper_golem: crate::renderer::entity_model::CopperGolemAnims,
     llama_decor: Option<crate::renderer::pipelines::entity_renderer::LlamaDecor>,
+    horse_armor: Option<crate::renderer::pipelines::entity_renderer::ArmorRenderInfo>,
+    horse_saddle: Option<crate::renderer::pipelines::entity_renderer::ArmorRenderInfo>,
     bee: crate::renderer::entity_model::BeeAnims,
     fox: crate::renderer::entity_model::FoxAnims,
     axolotl: crate::renderer::entity_model::AxolotlAnims,
@@ -6224,11 +6228,31 @@ fn fish_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
 }
 
 fn equine_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let horse_armor = if !e.is_baby {
+        e.equipment(EquipmentSlot::Body)
+            .and_then(crate::renderer::pipelines::entity_renderer::equipment_render_info)
+    } else {
+        None
+    };
+    let horse_saddle = if !e.is_baby {
+        e.equipment(EquipmentSlot::Saddle).map(|item| {
+            crate::renderer::pipelines::entity_renderer::equipment_render_info(item).unwrap_or(
+                crate::renderer::pipelines::entity_renderer::ArmorRenderInfo {
+                    asset_id: "minecraft:saddle".into(),
+                    dyed_color: None,
+                },
+            )
+        })
+    } else {
+        None
+    };
     EntityExtras {
         eat_anim: e.prev_eat_anim + (e.eat_anim - e.prev_eat_anim) * alpha,
         stand_anim: e.prev_stand_anim + (e.stand_anim - e.prev_stand_anim) * alpha,
         feeding_anim: e.prev_mouth_anim + (e.mouth_anim - e.prev_mouth_anim) * alpha,
         animate_tail: e.tail_swishing(),
+        horse_armor,
+        horse_saddle,
         ..Default::default()
     }
 }

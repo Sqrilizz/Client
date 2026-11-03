@@ -1801,6 +1801,70 @@ pub fn bake_undead_horse_model() -> BakedEntityModel {
     bake_model(equine_parts(), 64, 64)
 }
 
+fn equine_saddle_parts() -> Vec<EntityPart> {
+    vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 11.0, 5.0),
+            vec![ModelCube {
+                deformation: 0.5,
+                ..vbox((26, 0), (-5.0, -8.0, -9.0), (10.0, 9.0, 9.0))
+            }],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_6, 0.0, 0.0),
+            ..vpart(
+                "head_parts",
+                None,
+                Vec3::new(0.0, 4.0, -12.0),
+                vec![
+                    ModelCube {
+                        deformation: 0.2,
+                        ..vbox((1, 1), (-3.0, -11.0, -1.9), (6.0, 5.0, 6.0))
+                    },
+                    ModelCube {
+                        deformation: 0.2,
+                        ..vbox((19, 0), (-2.0, -11.0, -4.0), (4.0, 5.0, 2.0))
+                    },
+                    vbox((29, 5), (2.0, -9.0, -6.0), (1.0, 2.0, 2.0)),
+                    vbox((29, 5), (-3.0, -9.0, -6.0), (1.0, 2.0, 2.0)),
+                ],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(-0.5235988, 0.0, 0.0),
+            ..vpart(
+                "left_saddle_line",
+                Some(1),
+                Vec3::ZERO,
+                vec![vbox((32, 2), (3.1, -6.0, -8.0), (0.0, 3.0, 16.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(-0.5235988, 0.0, 0.0),
+            ..vpart(
+                "right_saddle_line",
+                Some(1),
+                Vec3::ZERO,
+                vec![vbox((32, 2), (-3.1, -6.0, -8.0), (0.0, 3.0, 16.0))],
+            )
+        },
+    ]
+}
+
+pub fn bake_horse_saddle_model() -> BakedEntityModel {
+    bake_root_scaled(equine_saddle_parts(), 1.1, 64, 64)
+}
+
+pub fn bake_equine_saddle_model() -> BakedEntityModel {
+    bake_model(equine_saddle_parts(), 64, 64)
+}
+
+pub fn bake_horse_armor_model() -> BakedEntityModel {
+    bake_root_scaled(equine_parts(), 1.1, 64, 64)
+}
+
 /// Vanilla `DonkeyModel.modifyMesh`: donkey ears replace the horse ears and
 /// two chest boxes hang off the body. `chest` false keeps the chest parts
 /// with no cubes so both variants share one part order.

@@ -3360,6 +3360,7 @@ impl AppCore {
             push_box,
             pusher_allowed,
             game.server_simulation_distance,
+            game.controlled_vehicle_id,
         );
     }
 
@@ -3687,6 +3688,7 @@ impl AppCore {
             game.interaction.slow_due_to_using_item(),
             vehicle,
         );
+        Self::tick_controlled_vehicle(game, input);
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
@@ -3821,10 +3823,241 @@ impl AppCore {
         );
     }
 
+    fn tick_controlled_vehicle(game: &mut GameState, input: &InputState) {
+        let Some(vehicle_id) = game.controlled_vehicle_id else {
+            return;
+        };
+        let Some(vehicle) = game.entity_store.living.get_mut(&vehicle_id) else {
+            return;
+        };
+
+        if crate::entity::is_equine(&vehicle.entity_type) {
+            if vehicle.equipment(azalea_inventory::components::EquipmentSlot::Saddle).is_none() {
+                return;
+            }
+            let player_yaw = game.player.look_dir.y_rot_deg();
+            vehicle.look_dir = crate::entity::components::LookDirection::new(player_yaw, 0.0);
+            vehicle.body_y_rot_deg = player_yaw;
+            vehicle.head_y_rot_deg = player_yaw;
+
+            let forward = if input.action_held(Action::Forward) {
+                1.0f64
+            } else if input.action_held(Action::Backward) {
+                -0.25f64
+            } else {
+                0.0f64
+            };
+            let strafe = if input.action_held(Action::StrafeLeft) {
+                0.5f64
+            } else if input.action_held(Action::StrafeRight) {
+                -0.5f64
+            } else {
+                0.0f64
+            };
+            let speed = vehicle
+                .attributes
+                .value(crate::attribute::AttributeKind::MovementSpeed)
+                .unwrap_or(0.225);
+
+            let yaw_rad = (player_yaw as f64).to_radians();
+            let sin_yaw = yaw_rad.sin();
+            let cos_yaw = yaw_rad.cos();
+            if forward != 0.0 || strafe != 0.0 {
+                let target_dx = (-sin_yaw * forward + cos_yaw * strafe) * speed;
+                let target_dz = (cos_yaw * forward + sin_yaw * strafe) * speed;
+                let accel = if vehicle.on_ground { 0.15 } else { 0.05 };
+                vehicle.velocity.x += (target_dx - vehicle.velocity.x) * accel;
+                vehicle.velocity.z += (target_dz - vehicle.velocity.z) * accel;
+            }
+
+            if vehicle.on_ground {
+                if input.performing_action(Action::Jump) {
+                    let jump_strength = vehicle
+                        .attributes
+                        .value(crate::attribute::AttributeKind::JumpStrength)
+                        .unwrap_or(0.7);
+                    vehicle.velocity.y = jump_strength * 0.85;
+                    vehicle.on_ground = false;
+                }
+            } else {
+                vehicle.velocity.y -= 0.08;
+                vehicle.velocity.y *= 0.98;
+            }
+
+            let world = crate::physics::collision::CollisionWorld::with_block_entities(
+                &game.chunk_store,
+                game.block_registry.block_state_table(),
+                &game.block_entity_anim,
+            );
+            let dims = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type);
+            let half_w = (dims.width as f64) * 0.5;
+            let aabb = crate::physics::aabb::Aabb::new(
+                glam::dvec3(
+                    vehicle.position.x - half_w,
+                    vehicle.position.y,
+                    vehicle.position.z - half_w,
+                ),
+                glam::dvec3(
+                    vehicle.position.x + half_w,
+                    vehicle.position.y + dims.height as f64,
+                    vehicle.position.z + half_w,
+                ),
+            );
+            let ctx = crate::physics::block_shape::CollisionContext::position(vehicle.position.y);
+            let (movement_step, on_ground) = crate::physics::collision::resolve_collision(
+                world,
+                aabb,
+                vehicle.velocity.into(),
+                1.0,
+                vehicle.on_ground,
+                &ctx,
+            );
+            vehicle.prev_position = vehicle.position;
+            vehicle.position.x += movement_step.x;
+            vehicle.position.y += movement_step.y;
+            vehicle.position.z += movement_step.z;
+            vehicle.on_ground = on_ground;
+
+            if on_ground {
+                vehicle.velocity.y = 0.0;
+                vehicle.velocity.x *= 0.6;
+                vehicle.velocity.z *= 0.6;
+            } else {
+                vehicle.velocity.x *= 0.91;
+                vehicle.velocity.z *= 0.91;
+            }
+
+            let dx = vehicle.position.x - vehicle.prev_position.x;
+            let dz = vehicle.position.z - vehicle.prev_position.z;
+            crate::entity::update_walk_animation(
+                dx,
+                0.0,
+                dz,
+                &mut vehicle.walk_anim_pos,
+                &mut vehicle.walk_anim_speed,
+                &mut vehicle.prev_walk_anim_speed,
+            );
+            game.sync_passengers(vehicle_id);
+        } else if crate::entity::is_boat(vehicle.entity_type) {
+            if input.action_held(Action::StrafeLeft) {
+                vehicle.body_y_rot_deg -= 2.5;
+            }
+            if input.action_held(Action::StrafeRight) {
+                vehicle.body_y_rot_deg += 2.5;
+            }
+            vehicle.look_dir =
+                crate::entity::components::LookDirection::new(vehicle.body_y_rot_deg, 0.0);
+
+            let forward = if input.action_held(Action::Forward) {
+                0.35f64
+            } else if input.action_held(Action::Backward) {
+                -0.1f64
+            } else {
+                0.0f64
+            };
+            let yaw_rad = (vehicle.body_y_rot_deg as f64).to_radians();
+            let sin_yaw = yaw_rad.sin();
+            let cos_yaw = yaw_rad.cos();
+            if forward != 0.0 {
+                vehicle.velocity.x += -sin_yaw * forward * 0.2;
+                vehicle.velocity.z += cos_yaw * forward * 0.2;
+            }
+            vehicle.velocity.x *= 0.9;
+            vehicle.velocity.z *= 0.9;
+
+            let in_water = {
+                let bx = vehicle.position.x.floor() as i32;
+                let by = vehicle.position.y.floor() as i32;
+                let bz = vehicle.position.z.floor() as i32;
+                let block = game.chunk_store.get_block_state(bx, by, bz);
+                game.block_registry
+                    .block_state_table()
+                    .block_state_data(block)
+                    .fluid()
+                    .kind
+                    == crate::world::block::FluidKind::Water
+            };
+            if in_water {
+                vehicle.velocity.y = 0.0;
+                vehicle.velocity.x *= 0.95;
+                vehicle.velocity.z *= 0.95;
+            } else {
+                vehicle.velocity.y = (vehicle.velocity.y - 0.04).max(-1.0);
+            }
+
+            let world = crate::physics::collision::CollisionWorld::with_block_entities(
+                &game.chunk_store,
+                game.block_registry.block_state_table(),
+                &game.block_entity_anim,
+            );
+            let dims = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type);
+            let half_w = (dims.width as f64) * 0.5;
+            let aabb = crate::physics::aabb::Aabb::new(
+                glam::dvec3(
+                    vehicle.position.x - half_w,
+                    vehicle.position.y,
+                    vehicle.position.z - half_w,
+                ),
+                glam::dvec3(
+                    vehicle.position.x + half_w,
+                    vehicle.position.y + dims.height as f64,
+                    vehicle.position.z + half_w,
+                ),
+            );
+            let ctx = crate::physics::block_shape::CollisionContext::position(vehicle.position.y);
+            let (movement_step, on_ground) = crate::physics::collision::resolve_collision(
+                world,
+                aabb,
+                vehicle.velocity.into(),
+                0.0,
+                vehicle.on_ground,
+                &ctx,
+            );
+            vehicle.prev_position = vehicle.position;
+            vehicle.position.x += movement_step.x;
+            vehicle.position.y += movement_step.y;
+            vehicle.position.z += movement_step.z;
+            vehicle.on_ground = on_ground;
+            if on_ground {
+                vehicle.velocity.y = 0.0;
+            }
+            game.sync_passengers(vehicle_id);
+        }
+    }
+
     pub fn send_position_packet(&self, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
         use azalea_protocol::common::movements::MoveFlags;
         use azalea_protocol::packets::game::*;
+
+        if let Some(vehicle_id) = game.controlled_vehicle_id {
+            if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
+                let flags = MoveFlags {
+                    on_ground: game.player.on_ground,
+                    horizontal_collision: game.player.horizontal_collision,
+                };
+                sender.send(ServerboundGamePacket::MovePlayerRot(
+                    ServerboundMovePlayerRot {
+                        look_direction: game.player.look_dir.into(),
+                        flags,
+                    },
+                ));
+                sender.send(ServerboundGamePacket::MoveVehicle(
+                    s_move_vehicle::ServerboundMoveVehicle {
+                        pos: azalea_core::position::Vec3 {
+                            x: vehicle.position.x,
+                            y: vehicle.position.y,
+                            z: vehicle.position.z,
+                        },
+                        look_direction: azalea_entity::LookDirection::new(
+                            vehicle.body_y_rot_deg,
+                            vehicle.look_dir.x_rot_deg(),
+                        ),
+                    },
+                ));
+                return;
+            }
+        }
 
         let pos = game.player.position;
         let look_dir = game.player.look_dir;

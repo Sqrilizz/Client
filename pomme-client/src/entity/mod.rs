@@ -2092,12 +2092,15 @@ impl EntityStore {
                     _ => 0,
                 }
             }
-            // Equine flags byte: bit 0x10 = eating, 0x20 = standing (rear),
-            // 0x40 = open mouth.
             (k, 18, Byte(f)) if is_equine(&k) => {
                 entity.is_eating = f & 0x10 != 0;
                 entity.is_standing = f & 0x20 != 0;
                 entity.is_open_mouth = f & 0x40 != 0;
+                if f & 0x04 != 0 && entity.equipment(EquipmentSlot::Saddle).is_none() {
+                    entity.set_equipment(EquipmentSlot::Saddle, ItemStack::new(azalea_registry::builtin::ItemKind::Saddle, 1));
+                } else if f & 0x04 == 0 && entity.equipment(EquipmentSlot::Saddle).is_some_and(|s| s.kind() == azalea_registry::builtin::ItemKind::Saddle) {
+                    entity.set_equipment(EquipmentSlot::Saddle, ItemStack::Empty);
+                }
             }
             (EntityKind::Donkey | EntityKind::Mule, 19, Bool(b)) => entity.has_chest = b,
             (k, 19, Bool(b)) if is_llama(k) => entity.has_chest = b,
@@ -2391,10 +2394,14 @@ impl EntityStore {
         local_push_box: Option<Aabb>,
         pusher_allowed: impl Fn(i32, &LivingEntity) -> bool,
         simulation_distance: u32,
+        controlled_vehicle_id: Option<i32>,
     ) -> DVec3 {
         let mut local_push = DVec3::ZERO;
         let thundering = self.thundering;
         for (&id, entity) in &mut self.living {
+            if Some(id) == controlled_vehicle_id {
+                continue;
+            }
             entity.tick_interpolation();
             // A scared armadillo's body control skips its client tick.
             if !(entity.entity_type == EntityKind::Armadillo && entity.armadillo.is_scared()) {
@@ -3030,6 +3037,7 @@ mod tests {
             None,
             |_, _| true,
             10,
+            None,
         );
     }
 
@@ -3107,6 +3115,7 @@ mod tests {
             Some(local_box),
             |id, _| id != 5,
             10,
+            None,
         );
         let expected = f64::from(0.05_f32) * 0.5;
 

@@ -198,6 +198,8 @@ pub struct EntityRenderInfo {
     pub copper_golem: entity_model::CopperGolemAnims,
     /// Llama carpet or trader decor.
     pub llama_decor: Option<LlamaDecor>,
+    pub horse_armor: Option<ArmorRenderInfo>,
+    pub horse_saddle: Option<ArmorRenderInfo>,
     pub bee: entity_model::BeeAnims,
     pub fox: entity_model::FoxAnims,
     /// Axolotl animator factors and baby animation clocks.
@@ -290,6 +292,8 @@ impl Default for EntityRenderInfo {
             allay: entity_model::AllayAnims::default(),
             copper_golem: entity_model::CopperGolemAnims::default(),
             llama_decor: None,
+            horse_armor: None,
+            horse_saddle: None,
             bee: entity_model::BeeAnims::default(),
             fox: entity_model::FoxAnims::default(),
             axolotl: entity_model::AxolotlAnims::default(),
@@ -430,6 +434,8 @@ struct ArmorAssetDef {
     humanoid: Vec<ArmorLayerDef>,
     leggings: Vec<ArmorLayerDef>,
     llama_body: Vec<ArmorLayerDef>,
+    horse_body: Vec<ArmorLayerDef>,
+    horse_saddle: Vec<ArmorLayerDef>,
 }
 
 struct ArmorTextureLayer {
@@ -472,6 +478,8 @@ struct ArmorAsset {
     humanoid: Vec<ArmorTextureLayer>,
     leggings: Vec<ArmorTextureLayer>,
     llama_body: Vec<ArmorTextureLayer>,
+    horse_body: Vec<ArmorTextureLayer>,
+    horse_saddle: Vec<ArmorTextureLayer>,
 }
 
 struct ArmorMesh {
@@ -486,6 +494,9 @@ struct ArmorMeshes {
     /// `LLAMA_DECOR` chestless and chested; the baby never shows a chest.
     llama_decor: [ArmorMesh; 2],
     baby_llama_decor: ArmorMesh,
+    horse_armor: ArmorMesh,
+    horse_saddle: ArmorMesh,
+    donkey_saddle: ArmorMesh,
 }
 
 impl MobEntry {
@@ -756,12 +767,26 @@ fn load_armor_asset_defs(
             let humanoid = layers("humanoid");
             let leggings = layers("humanoid_leggings");
             let llama_body = layers("llama_body");
-            (!humanoid.is_empty() || !leggings.is_empty() || !llama_body.is_empty()).then_some((
+            let horse_body = layers("horse_body");
+            let horse_saddle = layers("horse_saddle");
+            let horse_saddle = if horse_saddle.is_empty() {
+                layers("donkey_saddle")
+            } else {
+                horse_saddle
+            };
+            (!humanoid.is_empty()
+                || !leggings.is_empty()
+                || !llama_body.is_empty()
+                || !horse_body.is_empty()
+                || !horse_saddle.is_empty())
+            .then_some((
                 id,
                 ArmorAssetDef {
                     humanoid,
                     leggings,
                     llama_body,
+                    horse_body,
+                    horse_saddle,
                 },
             ))
         })
@@ -828,6 +853,8 @@ fn load_armor_assets(
                     humanoid: def.humanoid.into_iter().map(build).collect(),
                     leggings: def.leggings.into_iter().map(build).collect(),
                     llama_body: def.llama_body.into_iter().map(build).collect(),
+                    horse_body: def.horse_body.into_iter().map(build).collect(),
+                    horse_saddle: def.horse_saddle.into_iter().map(build).collect(),
                 },
             )
         })
@@ -858,6 +885,9 @@ fn build_armor_meshes(device: &rhi::backend::Device) -> ArmorMeshes {
         llama_decor: [false, true]
             .map(|chest| build_armor_mesh(device, entity_model::bake_llama_decor_model(chest))),
         baby_llama_decor: build_armor_mesh(device, entity_model::bake_baby_llama_decor_model()),
+        horse_armor: build_armor_mesh(device, entity_model::bake_horse_armor_model()),
+        horse_saddle: build_armor_mesh(device, entity_model::bake_horse_saddle_model()),
+        donkey_saddle: build_armor_mesh(device, entity_model::bake_equine_saddle_model()),
     }
 }
 
@@ -868,6 +898,8 @@ fn destroy_armor_assets(device: &rhi::backend::Device, assets: &mut HashMap<Stri
             .into_iter()
             .chain(asset.leggings)
             .chain(asset.llama_body)
+            .chain(asset.horse_body)
+            .chain(asset.horse_saddle)
     }) {
         layer.texture.destroy(device);
         layer.set.destroy(device);
@@ -2668,6 +2700,19 @@ impl EntityRenderer {
     ) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (vi, v) in vis.iter().enumerate() {
+            if let Some(saddle) = &v.info.horse_saddle {
+                let mesh = if v.info.entity_kind == EntityKind::Horse {
+                    &self.armor_meshes.horse_saddle
+                } else {
+                    &self.armor_meshes.donkey_saddle
+                };
+                let layers = self.equipment_layers(saddle, |asset| &asset.horse_saddle);
+                self.push_equipment_draws(vi, v, mesh, layers, instances, &mut records);
+            }
+            if let Some(armor) = &v.info.horse_armor {
+                let layers = self.equipment_layers(armor, |asset| &asset.horse_body);
+                self.push_equipment_draws(vi, v, &self.armor_meshes.horse_armor, layers, instances, &mut records);
+            }
             if let Some(decor) = &v.info.llama_decor {
                 let mesh = if v.info.is_baby {
                     &self.armor_meshes.baby_llama_decor
@@ -3430,7 +3475,12 @@ impl EntityRenderer {
             .chain(self.armor_meshes.husk.iter_mut())
             .chain(self.armor_meshes.zombie_villager.iter_mut())
             .chain(self.armor_meshes.llama_decor.iter_mut())
-            .chain([&mut self.armor_meshes.baby_llama_decor])
+            .chain([
+                &mut self.armor_meshes.baby_llama_decor,
+                &mut self.armor_meshes.horse_armor,
+                &mut self.armor_meshes.horse_saddle,
+                &mut self.armor_meshes.donkey_saddle,
+            ])
         {
             std::mem::take(&mut mesh.vertex_buffer).destroy(device);
         }
