@@ -831,6 +831,34 @@ impl ApplicationHandler for App {
                                             }
                                         }
                                     }
+                                } else if game.sign_editor.is_some() {
+                                    match code {
+                                        _ if self
+                                            .core
+                                            .input
+                                            .key_bindings
+                                            .matches_key(Action::Close, code) =>
+                                        {
+                                            game.close_sign_editor(Some(&connection));
+                                            self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
+                                            self.core
+                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
+                                        }
+                                        _ => {
+                                            let f3_held =
+                                                self.core.input.action_held(Action::DebugModifier);
+                                            if !game.handle_debug_key(
+                                                code,
+                                                f3_held,
+                                                &self.core.input.key_bindings,
+                                                &connection,
+                                            ) {
+                                                self.core.input.on_menu_key_event(&event);
+                                            }
+                                        }
+                                    }
                                 } else if game.wants_text_input() {
                                     // A container text field (anvil rename) has
                                     // focus; keys type into it. Escape still

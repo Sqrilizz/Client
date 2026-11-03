@@ -807,6 +807,8 @@ struct Ids777 {
     accept_teleportation_id: u32,
     accept_teleportation_old_id: u32,
     move_player_pos_rot_id: u32,
+    sign_update_id: u32,
+    sign_update_old_id: u32,
     /// The teleport id of an `accept_teleportation` held back until the
     /// `move_player_pos_rot` carrying its pose; cleared on `login`.
     pending_accept: Mutex<Option<u32>>,
@@ -1362,6 +1364,9 @@ impl Translation {
             if id == v777.accept_teleportation_id {
                 return translate_accept_teleportation_777(v777, &frame[pos..]);
             }
+            if id == v777.sign_update_id {
+                return translate_sign_update_777(v777.sign_update_old_id, &frame[pos..]);
+            }
             if id == v777.move_player_pos_rot_id
                 && let Some(frames) = translate_move_player_pos_rot_777(v777, &frame[pos..])
             {
@@ -1681,6 +1686,13 @@ impl GameIds {
                     "accept_teleportation",
                 ),
                 move_player_pos_rot_id: id(Serverbound, "move_player_pos_rot"),
+                sign_update_id: id(Serverbound, "sign_update"),
+                sign_update_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "sign_update",
+                ),
                 pending_accept: Mutex::new(None),
             }),
             items: ItemCodec::for_protocol(protocol).map(|codec| ItemIds {
@@ -5351,6 +5363,20 @@ fn translate_swing_777(punch_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
 
 /// Rewrites `player_action` for 26.3, which inserted `CHANGE_DESTROY_DIRECTION`
 /// at action 1, shifting every later action up by one.
+fn translate_sign_update_777(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    if payload.len() < 9 {
+        return Vec::new();
+    }
+    let pos_bytes = &payload[..8];
+    let is_front = payload[8];
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(pos_bytes);
+    out.extend_from_slice(&payload[9..]);
+    wire::write_varint(&mut out, if is_front != 0 { 1 } else { 0 });
+    vec![out]
+}
+
 fn translate_player_action_777(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let mut p = 0;
     let Some(action) = wire::read_varint(payload, &mut p) else {

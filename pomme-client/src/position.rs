@@ -52,3 +52,9 @@ impl From<BlockPos> for azalea_core::position::BlockPos {
         Self::new(pos.x, pos.y, pos.z)
     }
 }
+
+impl From<azalea_core::position::BlockPos> for BlockPos {
+    fn from(pos: azalea_core::position::BlockPos) -> Self {
+        Self::new(pos.x, pos.y, pos.z)
+    }
+}

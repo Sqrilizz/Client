@@ -231,6 +231,10 @@ pub struct GameState {
     pub recipe_book_ui: crate::ui::recipe_book::RecipeBookUiState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub sign_editor: Option<crate::ui::sign_edit::SignEditState>,
+    /// The GUI scale the game UI is currently built at; screens opened from
+    /// network events initialize with it.
+    pub gui_scale: f32,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
     /// The connection is in the configuration phase (the join, or a
@@ -571,6 +575,8 @@ impl GameState {
                 chat
             },
             server_dialog: None,
+            sign_editor: None,
+            gui_scale: 1.0,
             server_links: Vec::new(),
             dialog_registry: Arc::default(),
             configuring: true,
@@ -735,10 +741,146 @@ impl GameState {
             || self.open_container.is_some()
             || self.dialog_open()
             || self.game_mode_switcher.is_some()
+            || self.sign_editor.is_some()
     }
 
     /// The container menu the player currently has open (0 = survival
     /// inventory), if any.
+    pub fn open_sign_editor(&mut self, pos: BlockPos, is_front_text: bool) {
+        self.paused = false;
+        self.close_menu();
+        self.chat.close(crate::ui::chat::ChatExitReason::Interrupted);
+        let (lines, wood_color, text_color) = self.read_sign_data(pos, is_front_text);
+        self.sign_editor = Some(crate::ui::sign_edit::SignEditState::new(
+            pos,
+            is_front_text,
+            lines,
+            wood_color,
+            text_color,
+            self.gui_scale,
+        ));
+    }
+
+    /// Vanilla `AbstractSignEditScreen.onCancel`: close without submitting;
+    /// the server keeps the sign's original text.
+    pub fn cancel_sign_editor(&mut self) {
+        self.sign_editor = None;
+    }
+
+    pub fn close_sign_editor(&mut self, connection: Option<&ConnectionHandle>) {
+        if let Some(editor) = self.sign_editor.take() {
+            let lines = editor.lines_as_strings();
+            if let Some(conn) = connection {
+                conn.packet_tx.send(ServerboundGamePacket::SignUpdate(
+                    azalea_protocol::packets::game::s_sign_update::ServerboundSignUpdate {
+                        pos: editor.pos.into(),
+                        is_front_text: editor.is_front_text,
+                        lines: lines.clone(),
+                    },
+                ));
+            }
+            self.apply_local_sign_text(editor.pos, editor.is_front_text, lines);
+        }
+    }
+
+    pub fn read_sign_data(
+        &self,
+        pos: BlockPos,
+        is_front_text: bool,
+    ) -> ([String; 4], [f32; 4], [f32; 4]) {
+        let mut lines = [String::new(), String::new(), String::new(), String::new()];
+        let mut text_color = [0.0, 0.0, 0.0, 1.0];
+
+        if let Some(be) = self.chunk_store.block_entities.get(&pos) {
+            let side_key = if is_front_text { "front_text" } else { "back_text" };
+            if let Some(side) = be.nbt.compound(side_key) {
+                if let Some(color_name) = side.string("color") {
+                    if let Some(rgb) = crate::world::block_entity::dye_color_rgb(&color_name.to_str()) {
+                        text_color = crate::ui::common::rgb(rgb);
+                    }
+                }
+                if let Some(list) = side.list("messages") {
+                    if let Some(strings) = list.strings() {
+                        for (i, s) in strings.iter().enumerate().take(4) {
+                            let parsed = crate::world::block_entity::parse_line(&s.to_str());
+                            lines[i] = parsed.text;
+                        }
+                    }
+                }
+            } else {
+                for (i, key) in ["Text1", "Text2", "Text3", "Text4"].iter().enumerate() {
+                    if let Some(s) = be.nbt.string(key) {
+                        let parsed = crate::world::block_entity::parse_line(&s.to_str());
+                        lines[i] = parsed.text;
+                    }
+                }
+            }
+        }
+
+        let state = self.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+        let block_data = self.block_registry.block_state_data(state);
+        let name = block_data.id();
+        let wood_color = match name {
+            s if s.starts_with("spruce") => [0.45, 0.34, 0.21, 1.0],
+            s if s.starts_with("birch") => [0.82, 0.77, 0.60, 1.0],
+            s if s.starts_with("jungle") => [0.60, 0.43, 0.31, 1.0],
+            s if s.starts_with("acacia") => [0.67, 0.36, 0.20, 1.0],
+            s if s.starts_with("dark_oak") => [0.27, 0.18, 0.10, 1.0],
+            s if s.starts_with("mangrove") => [0.44, 0.20, 0.18, 1.0],
+            s if s.starts_with("cherry") => [0.88, 0.65, 0.65, 1.0],
+            s if s.starts_with("bamboo") => [0.77, 0.68, 0.24, 1.0],
+            s if s.starts_with("crimson") => [0.41, 0.20, 0.27, 1.0],
+            s if s.starts_with("warped") => [0.18, 0.42, 0.40, 1.0],
+            _ => [0.65, 0.50, 0.32, 1.0],
+        };
+
+        (lines, wood_color, text_color)
+    }
+
+    pub fn apply_local_sign_text(
+        &mut self,
+        pos: BlockPos,
+        is_front_text: bool,
+        lines: [String; 4],
+    ) {
+        use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+
+        let state = self.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+        let block_data = self.block_registry.block_state_data(state);
+        let kind = if block_data.id().contains("hanging_sign") {
+            azalea_registry::builtin::BlockEntityKind::HangingSign
+        } else {
+            azalea_registry::builtin::BlockEntityKind::Sign
+        };
+
+        let entry = self
+            .chunk_store
+            .block_entities
+            .entry(pos)
+            .or_insert_with(|| crate::world::block_entity::StoredBlockEntity {
+                kind,
+                nbt: NbtCompound::new(),
+            });
+        entry.kind = kind;
+
+        let side_key = if is_front_text { "front_text" } else { "back_text" };
+        let mut side = entry
+            .nbt
+            .compound(side_key)
+            .cloned()
+            .unwrap_or_else(NbtCompound::new);
+        let string_list: Vec<_> =
+            lines.iter().map(|line| line.as_str().into()).collect();
+        side.insert("messages", NbtTag::List(NbtList::String(string_list)));
+        entry.nbt.insert(side_key, NbtTag::Compound(side));
+        if is_front_text {
+            entry.nbt.insert("Text1", NbtTag::String(lines[0].as_str().into()));
+            entry.nbt.insert("Text2", NbtTag::String(lines[1].as_str().into()));
+            entry.nbt.insert("Text3", NbtTag::String(lines[2].as_str().into()));
+            entry.nbt.insert("Text4", NbtTag::String(lines[3].as_str().into()));
+        }
+    }
+
     pub fn open_menu_id(&self) -> Option<i32> {
         if let Some(c) = &self.open_container {
             Some(c.id)
@@ -831,6 +973,7 @@ impl GameState {
     pub fn close_menu(&mut self) {
         self.inventory_open = false;
         self.open_container = None;
+        self.sign_editor = None;
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
@@ -891,6 +1034,9 @@ impl GameState {
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self.sign_editor.is_some() {
+            return true;
+        }
         if self
             .server_dialog
             .as_ref()
@@ -2832,6 +2978,7 @@ pub fn update_game(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = core.menu.gui_scale(sw, sh);
+    game.gui_scale = gs;
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
@@ -4115,6 +4262,39 @@ pub fn update_game(
         Some(game.tick_count),
         &text_events,
     );
+
+    if let Some(editor) = game.sign_editor.as_mut() {
+        let fs = common::FONT_SIZE * gs;
+        let finish_typing = editor.handle_text_input(
+            &text_events,
+            &|s| gfx.renderer.menu_text_width(s, fs),
+        );
+        let finish_result = editor.build(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            core.input.cursor_pos(),
+            core.input.left_just_pressed(),
+            &|s| gfx.renderer.menu_text_width(s, fs),
+        );
+        match finish_result {
+            Some(crate::ui::sign_edit::SignEditResult::Submit) => {
+                game.close_sign_editor(Some(connection));
+                core.apply_cursor_grab(&gfx.window, Some(game));
+            }
+            Some(crate::ui::sign_edit::SignEditResult::Cancel) => {
+                game.cancel_sign_editor();
+                core.apply_cursor_grab(&gfx.window, Some(game));
+            }
+            None => {}
+        }
+        if finish_typing {
+            game.close_sign_editor(Some(connection));
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        core.input.clear_just_pressed_actions();
+    }
 
     if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
         let icon = if game
