@@ -3578,6 +3578,13 @@ impl AppCore {
                                 0.4 + 0.4 * (power as f64) / 90.0
                             };
                             v.velocity.y = jump_strength * scale;
+                            // Vanilla `executeRidersJump`: while W is held the
+                            // leap carries the rider forward.
+                            if input.action_held(Action::Forward) {
+                                let yaw_rad = (v.body_y_rot_deg as f64).to_radians();
+                                v.velocity.x += -0.4 * yaw_rad.sin() * scale;
+                                v.velocity.z += 0.4 * yaw_rad.cos() * scale;
+                            }
                             v.on_ground = false;
                         }
                     }
@@ -3974,88 +3981,17 @@ impl AppCore {
             );
             game.sync_passengers(vehicle_id);
         } else if crate::entity::is_boat(vehicle.entity_type) {
-            if input.action_held(Action::StrafeLeft) {
-                vehicle.body_y_rot_deg -= 2.5;
-            }
-            if input.action_held(Action::StrafeRight) {
-                vehicle.body_y_rot_deg += 2.5;
-            }
+            // Vanilla `AbstractBoat.tick` for the authoritative client
+            // instance: the steering keys map straight onto
+            // `inputLeft/Right/Up/Down` (W = row forward, S = row back).
+            let table = game.block_registry.block_state_table();
+            vehicle.boat_sim.input_left = input.action_held(Action::StrafeLeft);
+            vehicle.boat_sim.input_right = input.action_held(Action::StrafeRight);
+            vehicle.boat_sim.input_up = input.action_held(Action::Forward);
+            vehicle.boat_sim.input_down = input.action_held(Action::Backward);
+            crate::entity::boat::tick_controlled_boat(vehicle, &game.chunk_store, table);
             vehicle.look_dir =
                 crate::entity::components::LookDirection::new(vehicle.body_y_rot_deg, 0.0);
-
-            let forward = if input.action_held(Action::Forward) {
-                0.35f64
-            } else if input.action_held(Action::Backward) {
-                -0.1f64
-            } else {
-                0.0f64
-            };
-            let yaw_rad = (vehicle.body_y_rot_deg as f64).to_radians();
-            let sin_yaw = yaw_rad.sin();
-            let cos_yaw = yaw_rad.cos();
-            if forward != 0.0 {
-                vehicle.velocity.x += -sin_yaw * forward * 0.2;
-                vehicle.velocity.z += cos_yaw * forward * 0.2;
-            }
-            vehicle.velocity.x *= 0.9;
-            vehicle.velocity.z *= 0.9;
-
-            let in_water = {
-                let bx = vehicle.position.x.floor() as i32;
-                let by = vehicle.position.y.floor() as i32;
-                let bz = vehicle.position.z.floor() as i32;
-                let block = game.chunk_store.get_block_state(bx, by, bz);
-                game.block_registry
-                    .block_state_table()
-                    .block_state_data(block)
-                    .fluid()
-                    .kind
-                    == crate::world::block::FluidKind::Water
-            };
-            if in_water {
-                vehicle.velocity.y = 0.0;
-                vehicle.velocity.x *= 0.95;
-                vehicle.velocity.z *= 0.95;
-            } else {
-                vehicle.velocity.y = (vehicle.velocity.y - 0.04).max(-1.0);
-            }
-
-            let world = crate::physics::collision::CollisionWorld::with_block_entities(
-                &game.chunk_store,
-                game.block_registry.block_state_table(),
-                &game.block_entity_anim,
-            );
-            let dims = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type);
-            let half_w = (dims.width as f64) * 0.5;
-            let aabb = crate::physics::aabb::Aabb::new(
-                glam::dvec3(
-                    vehicle.position.x - half_w,
-                    vehicle.position.y,
-                    vehicle.position.z - half_w,
-                ),
-                glam::dvec3(
-                    vehicle.position.x + half_w,
-                    vehicle.position.y + dims.height as f64,
-                    vehicle.position.z + half_w,
-                ),
-            );
-            let ctx = crate::physics::block_shape::CollisionContext::position(vehicle.position.y);
-            let (movement_step, on_ground) = crate::physics::collision::resolve_collision(
-                world,
-                aabb,
-                vehicle.velocity.into(),
-                0.0,
-                vehicle.on_ground,
-                &ctx,
-            );
-            vehicle.prev_position = vehicle.position;
-            vehicle.position.x += movement_step.x;
-            vehicle.position.y += movement_step.y;
-            vehicle.position.z += movement_step.z;
-            vehicle.on_ground = on_ground;
-            if on_ground {
-                vehicle.velocity.y = 0.0;
-            }
             game.sync_passengers(vehicle_id);
         }
     }

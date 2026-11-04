@@ -1,5 +1,6 @@
 use glam::{Mat4, Vec3};
 
+use crate::entity::boat::clamped_lerp;
 use crate::renderer::chunk::mesher::pack_uv;
 use crate::renderer::rhi;
 
@@ -1833,7 +1834,7 @@ fn equine_saddle_parts() -> Vec<EntityPart> {
             )
         },
         EntityPart {
-            default_rotation: Vec3::new(-0.5235988, 0.0, 0.0),
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_6, 0.0, 0.0),
             ..vpart(
                 "left_saddle_line",
                 Some(1),
@@ -1842,7 +1843,7 @@ fn equine_saddle_parts() -> Vec<EntityPart> {
             )
         },
         EntityPart {
-            default_rotation: Vec3::new(-0.5235988, 0.0, 0.0),
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_6, 0.0, 0.0),
             ..vpart(
                 "right_saddle_line",
                 Some(1),
@@ -5867,6 +5868,41 @@ static BABY_RABBIT_HOP: KfAnim = {
 /// are keyframe-animated; there is no walk cycle).
 // TODO: IDLE_HEAD_TILT keyframe animation (idle flavor only; head look covers
 // the idle pose meanwhile).
+/// Boat (`AbstractBoatModel.setupAnim` → `animatePaddle`). Every frame writes
+/// absolute `xRot`/`yRot` for both paddles; the baked `zRot` (0.19634955, the
+/// vanilla `PartPose.offsetAndRotation` value) is the part's rest rotation and
+/// stays. `rowing_time` is `AbstractBoat.getRowingTime`, 0 while idle.
+pub fn compute_boat_anim(
+    model: &BakedEntityModel,
+    rowing_time_left: f32,
+    rowing_time_right: f32,
+) -> PartAnim {
+    use std::f32::consts::PI;
+    let mut anim = PartAnim::default();
+    for (idx, part) in model.parts.iter().enumerate() {
+        let (rowing_time, side) = match part.name.as_str() {
+            "left_paddle" => (rowing_time_left, 0),
+            "right_paddle" => (rowing_time_right, 1),
+            _ => continue,
+        };
+        let x_rot = clamped_lerp(
+            -std::f32::consts::FRAC_PI_3,
+            -0.2617994,
+            ((-rowing_time).sin() + 1.0) / 2.0,
+        );
+        let mut y_rot = clamped_lerp(
+            -std::f32::consts::FRAC_PI_4,
+            std::f32::consts::FRAC_PI_4,
+            ((-rowing_time + 1.0).sin() + 1.0) / 2.0,
+        );
+        if side == 1 {
+            y_rot = PI - y_rot;
+        }
+        anim.rotation.push((idx, Vec3::new(x_rot, y_rot, 0.19634955)));
+    }
+    anim
+}
+
 pub fn compute_rabbit_anim(
     model: &BakedEntityModel,
     head_x_rot_deg: f32,

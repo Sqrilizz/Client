@@ -1,3 +1,4 @@
+pub mod boat;
 pub mod components;
 pub mod dimensions;
 pub mod glowing;
@@ -825,6 +826,9 @@ pub struct LivingEntity {
     pub velocity: DVec3,
     /// Vanilla `wasTouchingWater`, probed per tick for aquatic kinds.
     pub is_in_water: bool,
+    /// Boat control state (vanilla `AbstractBoat`); only meaningful while
+    /// the kind is a `*_boat`/`*_raft`.
+    pub boat_sim: boat::BoatSim,
     /// Squid client sim (vanilla `Squid.aiStep`), degrees.
     pub x_body_rot: f32,
     pub prev_x_body_rot: f32,
@@ -1076,6 +1080,7 @@ impl LivingEntity {
             armor: Default::default(),
             velocity: DVec3::ZERO,
             is_in_water: false,
+            boat_sim: boat::BoatSim::new(),
             x_body_rot: 0.0,
             prev_x_body_rot: 0.0,
             z_body_rot: 0.0,
@@ -2063,6 +2068,11 @@ impl EntityStore {
             }
             (EntityKind::Creeper, 17, Bool(b)) => entity.powered = b,
             (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
+            // Boat paddle strokes (`AbstractBoat.DATA_ID_PADDLE_LEFT/RIGHT`),
+            // sequential after `VehicleEntity`'s hurt/damage ids; drives the
+            // remote boats' `animatePaddle` clocks.
+            (k, 15, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[0] = b,
+            (k, 16, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[1] = b,
             // Zombie-family underwater conversion / zombie villager curing.
             (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
             | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,

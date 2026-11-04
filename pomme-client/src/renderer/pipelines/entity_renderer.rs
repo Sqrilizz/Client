@@ -148,6 +148,10 @@ pub struct EntityRenderInfo {
     pub head_y_offset: f32,
     pub head_x_rot_deg_override: Option<f32>,
     pub has_red_overlay: bool,
+    /// Boat/raft paddle clocks (vanilla `getRowingTime(paddle, partialTick)`),
+    /// 0 disables the rowing pose.
+    pub rowing_time_left: f32,
+    pub rowing_time_right: f32,
     pub death_time: f32,
     /// Mob is targeting/attacking — raises zombie/skeleton arms.
     pub aggressive: bool,
@@ -262,6 +266,8 @@ impl Default for EntityRenderInfo {
             head_y_offset: 0.0,
             head_x_rot_deg_override: None,
             has_red_overlay: false,
+            rowing_time_left: 0.0,
+            rowing_time_right: 0.0,
             death_time: 0.0,
             aggressive: false,
             flap: 0.0,
@@ -1024,6 +1030,8 @@ enum AnimationType {
     /// Cod, salmon, tropical fish, pufferfish.
     Fish,
     Golem,
+    /// Boat/raft; the paddles row via `AbstractBoat.getRowingTime`.
+    Boat,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
 }
@@ -2260,7 +2268,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::OakBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), OAK_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2268,7 +2276,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::SpruceBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), SPRUCE_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2276,7 +2284,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::BirchBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), BIRCH_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2284,7 +2292,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::JungleBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), JUNGLE_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2292,7 +2300,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::AcaciaBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), ACACIA_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2300,7 +2308,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::CherryBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), CHERRY_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2308,7 +2316,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::DarkOakBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), DARK_OAK_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2316,7 +2324,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::MangroveBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), MANGROVE_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2324,7 +2332,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::PaleOakBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_boat_model(), PALE_OAK_BOAT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2332,7 +2340,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::BambooRaft,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_raft_model(), BAMBOO_RAFT_TEX, 64)],
             baby: None,
             adult_overlays: vec![],
@@ -2340,7 +2348,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::OakChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), OAK_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2348,7 +2356,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::SpruceChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), SPRUCE_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2356,7 +2364,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::BirchChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), BIRCH_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2364,7 +2372,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::JungleChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), JUNGLE_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2372,7 +2380,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::AcaciaChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), ACACIA_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2380,7 +2388,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::CherryChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), CHERRY_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2388,7 +2396,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::DarkOakChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), DARK_OAK_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2396,7 +2404,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::MangroveChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), MANGROVE_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2404,7 +2412,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::PaleOakChestBoat,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_boat_model(), PALE_OAK_CHEST_BOAT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -2412,7 +2420,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::BambooChestRaft,
-            anim: AnimationType::Static,
+            anim: AnimationType::Boat,
             adult: vec![opaque(entity_model::bake_chest_raft_model(), BAMBOO_CHEST_RAFT_TEX, 128)],
             baby: None,
             adult_overlays: vec![],
@@ -3076,6 +3084,11 @@ impl EntityRenderer {
                 info.walk_anim_speed,
                 info.golem_attack_ticks,
                 info.golem_offer_flower_ticks,
+            ),
+            AnimationType::Boat => entity_model::compute_boat_anim(
+                model,
+                info.rowing_time_left,
+                info.rowing_time_right,
             ),
             AnimationType::Static => entity_model::PartAnim::default(),
         }

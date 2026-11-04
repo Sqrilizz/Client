@@ -4512,6 +4512,8 @@ pub fn update_game(
                     head_y_offset: extras.head_y_offset,
                     head_x_rot_deg_override: extras.head_x_rot_deg_override,
                     has_red_overlay: has_red_overlay(e.hurt_time, e.death_time),
+                    rowing_time_left: e.boat_sim.rowing_time(0, partial_tick),
+                    rowing_time_right: e.boat_sim.rowing_time(1, partial_tick),
                     death_time: render_death_time(e.death_time, partial_tick),
                     aggressive: e.aggressive,
                     flap: extras.flap,
