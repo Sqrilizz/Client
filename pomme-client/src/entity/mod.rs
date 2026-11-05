@@ -2450,6 +2450,9 @@ impl EntityStore {
                 entity.tick_party(chunks, block_state_table);
             }
             entity.tick_kind_anims();
+            if is_boat(entity.entity_type) {
+                boat::tick_paddles(&mut entity.boat_sim);
+            }
             if entity.entity_type == EntityKind::Panda {
                 let holding = entity.equipment(EquipmentSlot::Mainhand).is_some();
                 if entity.panda.tick(thundering, entity.is_in_water, holding) {

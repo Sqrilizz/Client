@@ -8,7 +8,6 @@ use crate::physics::block_shape::{CollisionContext, collision_shape};
 use crate::physics::collision::resolve_collision;
 use crate::world::block::{BlockStateTable, FluidKind};
 use crate::world::chunk::ChunkStore;
-use glam::DVec3;
 
 /// Vanilla `AbstractBoat.getDefaultGravity`.
 const BOAT_GRAVITY: f64 = 0.04;
@@ -99,8 +98,23 @@ pub fn clamped_lerp(start: f32, end: f32, t: f32) -> f32 {
     }
 }
 
-/// The `(kind, height, is_source)` of the block position's fluid.
+/// The `(kind, height, is_source)` of the block position's fluid, through
+/// vanilla `FluidState.getHeight`: the same fluid above makes the column read
+/// full height, otherwise the state's own `amount / 9`.
 fn fluid_of(
+    chunk_store: &ChunkStore,
+    table: BlockStateTable,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Option<(FluidKind, f32, bool)> {
+    let (kind, height, source) = fluid_state(chunk_store, table, x, y, z)?;
+    let full = fluid_state(chunk_store, table, x, y + 1, z)
+        .is_some_and(|(above_kind, _, above_source)| above_kind == kind && above_source == source);
+    Some((kind, if full { 1.0 } else { height }, source))
+}
+
+fn fluid_state(
     chunk_store: &ChunkStore,
     table: BlockStateTable,
     x: i32,
@@ -109,11 +123,8 @@ fn fluid_of(
 ) -> Option<(FluidKind, f32, bool)> {
     let state = chunk_store.get_block_state(x, y, z);
     let fluid = table.block_state_data(state).fluid();
-    if fluid.kind == FluidKind::Empty {
-        None
-    } else {
-        Some((fluid.kind, fluid.height(), fluid.amount >= 8))
-    }
+    (fluid.kind != FluidKind::Empty)
+        .then(|| (fluid.kind, fluid.height(), fluid.amount == 8 && !fluid.falling))
 }
 
 /// The boat's collision box: full-width square, `height` tall from the feet.
@@ -142,7 +153,7 @@ fn underwater_status(
     let top = aabb.max.y + 0.001;
     let x0 = aabb.min.x.floor() as i32;
     let x1 = aabb.max.x.ceil() as i32;
-    let y0 = top.floor() as i32;
+    let y0 = aabb.max.y.floor() as i32;
     let y1 = top.ceil() as i32;
     let z0 = aabb.min.z.floor() as i32;
     let z1 = aabb.max.z.ceil() as i32;
@@ -156,7 +167,7 @@ fn underwater_status(
                 if kind != FluidKind::Water {
                     continue;
                 }
-                if top < y as f64 + height as f64 {
+                if top < (y as f32 + height) as f64 {
                     if is_source {
                         source_found = true;
                     } else {
@@ -286,16 +297,18 @@ fn boat_status(
     (BoatStatus::InAir, None, None)
 }
 
-/// Vanilla `getWaterLevelAbove`: walk levels from the hull top upward; the
-/// first one whose water is shallower than half a block ends there.
+/// Vanilla `getWaterLevelAbove`: sample the layers the hull swept through on
+/// its last descent (`maxY - lastYd`), and return the first with no full
+/// block of water.
 fn water_level_above(boat: &LivingEntity, chunk_store: &ChunkStore, table: BlockStateTable) -> f64 {
     let aabb = boat_aabb(boat);
     let x0 = aabb.min.x.floor() as i32;
     let x1 = aabb.max.x.ceil() as i32;
     let z0 = aabb.min.z.floor() as i32;
     let z1 = aabb.max.z.ceil() as i32;
-    let mut y = aabb.max.y.floor() as i32;
-    loop {
+    let y0 = aabb.max.y.floor() as i32;
+    let y1 = (aabb.max.y - boat.boat_sim.last_yd).ceil() as i32;
+    for y in y0..y1 {
         let mut level = 0.0f32;
         for x in x0..x1 {
             for z in z0..z1 {
@@ -307,11 +320,11 @@ fn water_level_above(boat: &LivingEntity, chunk_store: &ChunkStore, table: Block
                 }
             }
         }
-        if level < 0.5 {
+        if level < 1.0 {
             return y as f64 + level as f64;
         }
-        y += 1;
     }
+    y1 as f64 + 1.0
 }
 
 /// Vanilla `floatBoat`: per-status gravity/spring/drag. On the splash-down
@@ -337,8 +350,9 @@ fn float_boat(
         && sim.status != BoatStatus::OnLand
     {
         sim.water_level = boat.position.y + bb_height;
-        // `f = wla - bbHeight + 0.101`; the hull snaps there when free.
-        let water_level = water_level_above(boat, chunk_store, table) - bb_height + 0.101;
+        // `f = (float)(wla - bbHeight) + 0.101`; the hull snaps there when free.
+        let water_level =
+            (water_level_above(boat, chunk_store, table) as f32 - dims.height) as f64 + 0.101;
         let aabb = boat_aabb(boat).offset(glam::dvec3(0.0, water_level - boat.position.y, 0.0));
         let world = crate::physics::collision::CollisionWorld::new(chunk_store, table);
         if crate::physics::collision::no_collision(
@@ -347,10 +361,11 @@ fn float_boat(
             &CollisionContext::position(boat.position.y),
         ) {
             boat.position.y = water_level;
-            boat.velocity = DVec3::ZERO;
+            // `setDeltaMovement(multiply(1.0, 0.0, 1.0))`.
+            boat.velocity.y = 0.0;
             sim.last_yd = 0.0;
-            sim.status = BoatStatus::InWater;
         }
+        sim.status = BoatStatus::InWater;
         return;
     }
 
@@ -384,7 +399,7 @@ fn float_boat(
     boat.velocity.y += gravity_delta;
     boat.velocity.z *= drag as f64;
     sim.delta_rotation *= drag;
-    if spring != 0.0 {
+    if spring > 0.0 {
         boat.velocity.y = (boat.velocity.y + spring * 0.04 / 0.65) * 0.75;
     }
 }
@@ -402,31 +417,33 @@ fn control_boat(boat: &mut LivingEntity, sim: &mut BoatSim) {
     if (sim.input_right != sim.input_left) && !sim.input_up && !sim.input_down {
         control += 0.005;
     }
-    sim.paddle_state[0] =
-        (sim.input_right && sim.input_left) || (!sim.input_right && sim.input_up);
-    sim.paddle_state[1] =
-        (sim.input_right && sim.input_left) || (!sim.input_left && sim.input_up);
+    // The hull turns on the delta the previous tick left behind, before this
+    // tick's keystrokes add to it.
+    let yaw = boat.body_y_rot_deg + sim.delta_rotation;
+    boat.body_y_rot_deg = yaw;
+    boat.head_y_rot_deg = yaw;
     if sim.input_up {
         control += 0.04;
     }
     if sim.input_down {
         control -= 0.005;
     }
-    let yaw = boat.body_y_rot_deg + sim.delta_rotation;
-    boat.body_y_rot_deg = yaw;
-    boat.head_y_rot_deg = yaw;
     // `velocity += (-sin(yaw) * control, 0, cos(yaw) * control)`.
     let yaw_rad = (yaw as f64).to_radians();
     boat.velocity.x -= yaw_rad.sin() * control as f64;
     boat.velocity.z += yaw_rad.cos() * control as f64;
+    sim.paddle_state[0] = (sim.input_right && !sim.input_left) || sim.input_up;
+    sim.paddle_state[1] = (sim.input_left && !sim.input_right) || sim.input_up;
 }
 
-/// Vanilla's post-`move` paddle clock: each stroking paddle advances π/8 per
-/// tick; idle paddles reset their phase.
-fn tick_paddles(sim: &mut BoatSim) {
+/// Vanilla's paddle clock from `tick`, which every client runs on every boat:
+/// a stroking paddle advances π/8 radians wrapped to one turn, an idle one
+/// resets its phase.
+pub fn tick_paddles(sim: &mut BoatSim) {
     for i in 0..2 {
         if sim.paddle_state[i] {
-            sim.paddle_positions[i] += PADDLE_SPEED;
+            sim.paddle_positions[i] =
+                (sim.paddle_positions[i] + PADDLE_SPEED) % std::f32::consts::TAU;
         } else {
             sim.paddle_positions[i] = 0.0;
         }
@@ -485,11 +502,99 @@ pub fn tick_controlled_boat(
     boat.position.y += movement_step.y;
     boat.position.z += movement_step.z;
     boat.on_ground = on_ground;
+    // Vanilla records lastYd inside `move` before restitution may zero y.
+    sim.last_yd = boat.velocity.y;
     if on_ground {
         boat.velocity.y = 0.0;
     }
 
     // 5. Paddle animation clock.
     tick_paddles(&mut sim);
+    if std::env::var_os("POMME_BOAT_TRACE").is_some() {
+        eprintln!(
+            "BOAT l={} r={} u={} d={} delta={:.3} yaw={:.3} vel=({:.4},{:.4},{:.4}) pos=({:.3},{:.3},{:.3}) status={:?}",
+            sim.input_left, sim.input_right, sim.input_up, sim.input_down,
+            sim.delta_rotation, boat.body_y_rot_deg,
+            boat.velocity.x, boat.velocity.y, boat.velocity.z,
+            boat.position.x, boat.position.y, boat.position.z, sim.status
+        );
+    }
     boat.boat_sim = sim;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::EntityKind;
+    use crate::entity::components::{LookDirection, Position};
+    use crate::world::chunk::ChunkStore;
+
+    fn pool() -> (ChunkStore, BlockStateTable) {
+        let table = BlockStateTable::native();
+        let store = ChunkStore::with_origin_chunk();
+        for x in -8..24 {
+            for z in -8..24 {
+                store.set_block_state(x, 59, z, table.find_state("stone", &[]), table);
+                store.set_block_state(x, 60, z, table.find_state("water", &[]), table);
+                store.set_block_state(x, 61, z, table.find_state("water", &[]), table);
+            }
+        }
+        (store, table)
+    }
+
+    #[test]
+    fn boat_drives_forward_in_water() {
+        let (store, table) = pool();
+        let mut boat = LivingEntity::new(
+            EntityKind::OakBoat,
+            Position::new(0.5, 60.0, 0.5),
+            LookDirection::new(0.0, 0.0),
+            uuid::Uuid::from_u128(1),
+        );
+        for _ in 0..40 {
+            tick_controlled_boat(&mut boat, &store, table);
+        }
+        assert!(
+            (61.0..62.0).contains(&boat.position.y),
+            "boat failed to float at the column surface: y={}",
+            boat.position.y
+        );
+        boat.boat_sim.input_up = true;
+        for _ in 0..20 {
+            tick_controlled_boat(&mut boat, &store, table);
+            assert_eq!(
+                boat.boat_sim.status,
+                BoatStatus::InWater,
+                "status flipped while floating"
+            );
+            assert!(
+                boat.position.y > 61.0,
+                "boat sank below the surface: y={}",
+                boat.position.y
+            );
+        }
+        assert!(boat.position.z > 4.0, "boat barely moved: z={}", boat.position.z);
+        assert!(
+            boat.body_y_rot_deg.abs() < 1.0,
+            "yaw drifted to {}",
+            boat.body_y_rot_deg
+        );
+    }
+
+    #[test]
+    fn boat_does_not_spin_without_turning() {
+        let (store, table) = pool();
+        let mut boat = LivingEntity::new(
+            EntityKind::OakBoat,
+            Position::new(0.5, 61.0, 0.5),
+            LookDirection::new(0.0, 0.0),
+            uuid::Uuid::from_u128(1),
+        );
+        boat.boat_sim.input_up = true;
+        for _ in 0..60 {
+            tick_controlled_boat(&mut boat, &store, table);
+        }
+        assert!(boat.body_y_rot_deg.abs() < 1.0, "yaw drifted to {}", boat.body_y_rot_deg);
+        assert!(boat.position.z > 5.0, "boat barely moved: z={}", boat.position.z);
+    }
 }

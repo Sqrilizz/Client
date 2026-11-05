@@ -50,6 +50,15 @@ pub struct InputState {
     /// A harness `press` waiting for the next frame.
     #[cfg(feature = "test-harness")]
     harness_press: Option<(KeyCode, bool)>,
+    /// A harness `key_down` waiting for the next frame.
+    #[cfg(feature = "test-harness")]
+    harness_down: Option<(KeyCode, bool)>,
+    /// A harness `key_up` waiting for the next frame.
+    #[cfg(feature = "test-harness")]
+    harness_up: Option<KeyCode>,
+    /// Ctrl a held `key_down` keeps down until the next `key_up`.
+    #[cfg(feature = "test-harness")]
+    harness_ctrl_held: bool,
     /// The key a harness `press` released last frame, for the in-game release
     /// handling.
     #[cfg(feature = "test-harness")]
@@ -183,6 +192,12 @@ impl InputState {
             harness_ctrl: false,
             #[cfg(feature = "test-harness")]
             harness_press: None,
+            #[cfg(feature = "test-harness")]
+            harness_down: None,
+            #[cfg(feature = "test-harness")]
+            harness_up: None,
+            #[cfg(feature = "test-harness")]
+            harness_ctrl_held: false,
             #[cfg(feature = "test-harness")]
             harness_released: None,
             #[cfg(feature = "test-harness")]
@@ -700,11 +715,22 @@ impl InputState {
         self.gamepad_buttons_just_pressed.clear();
         #[cfg(feature = "test-harness")]
         {
-            self.harness_ctrl = false;
             self.harness_released = None;
+            self.harness_ctrl = self.harness_ctrl_held;
             if let Some((code, ctrl)) = self.harness_press.take() {
-                self.harness_ctrl = ctrl;
+                self.harness_ctrl = self.harness_ctrl_held || ctrl;
                 self.on_key(code, ElementState::Pressed, false);
+                self.on_key(code, ElementState::Released, false);
+                self.harness_released = Some(code);
+            }
+            if let Some((code, ctrl)) = self.harness_down.take() {
+                self.harness_ctrl_held |= ctrl;
+                self.harness_ctrl = self.harness_ctrl_held;
+                self.on_key(code, ElementState::Pressed, false);
+            }
+            if let Some(code) = self.harness_up.take() {
+                self.harness_ctrl_held = false;
+                self.harness_ctrl = false;
                 self.on_key(code, ElementState::Released, false);
                 self.harness_released = Some(code);
             }
@@ -745,6 +771,18 @@ impl InputState {
     #[cfg(feature = "test-harness")]
     pub fn press_key(&mut self, code: KeyCode, ctrl: bool) {
         self.harness_press = Some((code, ctrl));
+    }
+
+    /// Holds `code` down until `up_key`, as a real held key would.
+    #[cfg(feature = "test-harness")]
+    pub fn down_key(&mut self, code: KeyCode, ctrl: bool) {
+        self.harness_down = Some((code, ctrl));
+    }
+
+    /// Releases a key `down_key` holds.
+    #[cfg(feature = "test-harness")]
+    pub fn up_key(&mut self, code: KeyCode) {
+        self.harness_up = Some(code);
     }
 
     /// The key a harness `press` released, once.

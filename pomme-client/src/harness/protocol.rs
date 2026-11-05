@@ -48,6 +48,10 @@ pub enum Command {
     },
     /// Presses a key once: a key binding's default key, or a physical key.
     Press(Press),
+    /// Holds a key down until a matching `key_up`.
+    KeyDown(Press),
+    /// Releases a key a `key_down` holds.
+    KeyUp(Press),
     /// Assigns inputs to a key binding for this session, unsaved.
     Bind(Bind),
     /// Changes client options through the options screen's own setters.
