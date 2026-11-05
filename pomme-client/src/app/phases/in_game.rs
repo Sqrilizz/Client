@@ -9,6 +9,8 @@ pub fn passenger_attachment_offset(
     kind: EntityKind,
     height: f32,
     seat_index: usize,
+    passenger_count: usize,
+    passenger_is_animal: bool,
     yaw_deg: f32,
 ) -> glam::DVec3 {
     let yaw_rad = (yaw_deg as f64).to_radians();
@@ -16,8 +18,23 @@ pub fn passenger_attachment_offset(
     let fz = yaw_rad.cos();
 
     if is_boat(kind) {
-        let seat_dist = if seat_index == 0 { 0.2 } else { -0.6 };
-        glam::DVec3::new(fx * seat_dist, (height as f64) / 3.0, fz * seat_dist)
+        let x_offset = if passenger_count > 1 {
+            let mut base = if seat_index == 0 { 0.2 } else { -0.6 };
+            if passenger_is_animal {
+                base += 0.2;
+            }
+            base
+        } else if crate::entity::is_chest_boat(kind) {
+            0.15
+        } else {
+            0.0
+        };
+        let ride_height = if crate::entity::is_raft(kind) {
+            (height as f64) * 0.8888889
+        } else {
+            (height as f64) / 3.0
+        };
+        glam::DVec3::new(fx * x_offset, ride_height, fz * x_offset)
     } else if is_minecart(kind) {
         glam::DVec3::new(0.0, -0.35, 0.0)
     } else {
@@ -33,18 +50,10 @@ pub fn passenger_attachment_offset(
                 let seat_dist = if seat_index == 0 { 0.5 } else { -0.7 };
                 glam::DVec3::new(fx * seat_dist, 1.8 - 0.35, fz * seat_dist)
             }
-            EntityKind::Llama | EntityKind::TraderLlama => {
-                glam::DVec3::new(0.0, 1.4 - 0.35, 0.0)
-            }
-            EntityKind::Pig => {
-                glam::DVec3::new(0.0, (height as f64) * 0.6 - 0.35, 0.0)
-            }
-            EntityKind::Strider => {
-                glam::DVec3::new(0.0, 1.275 - 0.35, 0.0)
-            }
-            _ => {
-                glam::DVec3::new(0.0, (height as f64) * 0.75 - 0.35, 0.0)
-            }
+            EntityKind::Llama | EntityKind::TraderLlama => glam::DVec3::new(0.0, 1.4 - 0.35, 0.0),
+            EntityKind::Pig => glam::DVec3::new(0.0, (height as f64) * 0.6 - 0.35, 0.0),
+            EntityKind::Strider => glam::DVec3::new(0.0, 1.275 - 0.35, 0.0),
+            _ => glam::DVec3::new(0.0, (height as f64) * 0.75 - 0.35, 0.0),
         }
     }
 }
@@ -745,21 +754,54 @@ impl GameState {
                 let h = crate::entity::dimensions::EntityDimensions::of(e.entity_type).height;
                 (*e.position, e.body_y_rot_deg, e.entity_type, h, e.on_ground)
             } else if let Some(pos) = self.entity_positions.get(&vehicle_id) {
-                let kind = self.entity_kinds.get(&vehicle_id).copied().unwrap_or(EntityKind::ArmorStand);
+                let kind = self
+                    .entity_kinds
+                    .get(&vehicle_id)
+                    .copied()
+                    .unwrap_or(EntityKind::ArmorStand);
                 let h = crate::entity::dimensions::EntityDimensions::of(kind).height;
                 (**pos, 0.0, kind, h, false)
             } else {
                 return;
             };
 
+        let passenger_count = passengers.len();
         for (seat_idx, passenger_id) in passengers.into_iter().enumerate() {
-            let offset = passenger_attachment_offset(vehicle_kind, height, seat_idx, vehicle_yaw);
+            let is_animal = self
+                .entity_store
+                .living
+                .get(&passenger_id)
+                .is_some_and(|e| crate::entity::is_animal(e.entity_type));
+            let offset = passenger_attachment_offset(
+                vehicle_kind,
+                height,
+                seat_idx,
+                passenger_count,
+                is_animal,
+                vehicle_yaw,
+            );
             let pos = vehicle_pos + offset;
             if passenger_id == self.player.entity_id {
-                self.player.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
+                self.player.position =
+                    crate::entity::components::Position::new(pos.x, pos.y, pos.z);
                 self.player.prev_position = self.player.position;
                 self.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
                 self.player.on_ground = vehicle_on_ground;
+                if is_boat(vehicle_kind) {
+                    self.player.body_y_rot = vehicle_yaw;
+                    self.player.prev_body_y_rot = vehicle_yaw;
+                    let diff =
+                        crate::entity::wrap_degrees(self.player.look_dir.y_rot_deg() - vehicle_yaw);
+                    let clamped = diff.clamp(-105.0, 105.0);
+                    let delta = clamped - diff;
+                    if delta != 0.0 {
+                        let new_yaw = self.player.look_dir.y_rot_deg() + delta;
+                        self.player.look_dir = crate::entity::components::LookDirection::new(
+                            new_yaw,
+                            self.player.look_dir.x_rot_deg(),
+                        );
+                    }
+                }
             }
             if let Some(display) = self.text_display_store.get_mut(passenger_id) {
                 display.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
@@ -768,6 +810,29 @@ impl GameState {
             if let Some(e) = self.entity_store.living.get_mut(&passenger_id) {
                 e.position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
                 e.prev_position = e.position;
+                if is_boat(vehicle_kind) && e.entity_type != EntityKind::Breeze {
+                    e.body_y_rot_deg = vehicle_yaw;
+                    e.prev_body_y_rot_deg = vehicle_yaw;
+                    let diff = crate::entity::wrap_degrees(e.look_dir.y_rot_deg() - vehicle_yaw);
+                    let clamped = diff.clamp(-105.0, 105.0);
+                    let delta = clamped - diff;
+                    if delta != 0.0 {
+                        let new_yaw = e.look_dir.y_rot_deg() + delta;
+                        e.look_dir = crate::entity::components::LookDirection::new(
+                            new_yaw,
+                            e.look_dir.x_rot_deg(),
+                        );
+                    }
+                    e.head_y_rot_deg = e.look_dir.y_rot_deg();
+                    e.prev_head_y_rot_deg = e.head_y_rot_deg;
+                    if is_animal && passenger_count == 2 {
+                        let offset = if passenger_id % 2 == 0 { 90.0 } else { 270.0 };
+                        e.body_y_rot_deg += offset;
+                        e.prev_body_y_rot_deg += offset;
+                        e.head_y_rot_deg += offset;
+                        e.prev_head_y_rot_deg += offset;
+                    }
+                }
             }
         }
     }
@@ -812,7 +877,8 @@ impl GameState {
     pub fn open_sign_editor(&mut self, pos: BlockPos, is_front_text: bool) {
         self.paused = false;
         self.close_menu();
-        self.chat.close(crate::ui::chat::ChatExitReason::Interrupted);
+        self.chat
+            .close(crate::ui::chat::ChatExitReason::Interrupted);
         let (lines, is_hanging, is_wall, wood_index, text_color) =
             self.read_sign_data(pos, is_front_text);
         self.sign_editor = Some(crate::ui::sign_edit::SignEditState::new(
@@ -852,10 +918,16 @@ impl GameState {
         let mut text_color = [0.0, 0.0, 0.0, 1.0];
 
         if let Some(be) = self.chunk_store.block_entities.get(&pos) {
-            let side_key = if is_front_text { "front_text" } else { "back_text" };
+            let side_key = if is_front_text {
+                "front_text"
+            } else {
+                "back_text"
+            };
             if let Some(side) = be.nbt.compound(side_key) {
                 if let Some(color_name) = side.string("color") {
-                    if let Some(rgb) = crate::world::block_entity::dye_color_rgb(&color_name.to_str()) {
+                    if let Some(rgb) =
+                        crate::world::block_entity::dye_color_rgb(&color_name.to_str())
+                    {
                         text_color = crate::ui::common::rgb(rgb);
                     }
                 }
@@ -916,21 +988,32 @@ impl GameState {
             });
         entry.kind = kind;
 
-        let side_key = if is_front_text { "front_text" } else { "back_text" };
+        let side_key = if is_front_text {
+            "front_text"
+        } else {
+            "back_text"
+        };
         let mut side = entry
             .nbt
             .compound(side_key)
             .cloned()
             .unwrap_or_else(NbtCompound::new);
-        let string_list: Vec<_> =
-            lines.iter().map(|line| line.as_str().into()).collect();
+        let string_list: Vec<_> = lines.iter().map(|line| line.as_str().into()).collect();
         side.insert("messages", NbtTag::List(NbtList::String(string_list)));
         entry.nbt.insert(side_key, NbtTag::Compound(side));
         if is_front_text {
-            entry.nbt.insert("Text1", NbtTag::String(lines[0].as_str().into()));
-            entry.nbt.insert("Text2", NbtTag::String(lines[1].as_str().into()));
-            entry.nbt.insert("Text3", NbtTag::String(lines[2].as_str().into()));
-            entry.nbt.insert("Text4", NbtTag::String(lines[3].as_str().into()));
+            entry
+                .nbt
+                .insert("Text1", NbtTag::String(lines[0].as_str().into()));
+            entry
+                .nbt
+                .insert("Text2", NbtTag::String(lines[1].as_str().into()));
+            entry
+                .nbt
+                .insert("Text3", NbtTag::String(lines[2].as_str().into()));
+            entry
+                .nbt
+                .insert("Text4", NbtTag::String(lines[3].as_str().into()));
         }
     }
 
@@ -2704,6 +2787,24 @@ pub fn update_game(
             core.menu.invert_mouse_x,
             core.menu.invert_mouse_y,
         );
+        if let Some(vehicle_id) = game.riding_vehicle_id {
+            if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
+                if is_boat(vehicle.entity_type) {
+                    let boat_yaw = vehicle.body_y_rot_deg;
+                    let cam_look = gfx.renderer.camera_look_dir();
+                    let diff = crate::entity::wrap_degrees(cam_look.y_rot_deg() - boat_yaw);
+                    let clamped = diff.clamp(-105.0, 105.0);
+                    let delta = clamped - diff;
+                    if delta != 0.0 {
+                        let new_look = crate::entity::components::LookDirection::new(
+                            cam_look.y_rot_deg() + delta,
+                            cam_look.x_rot_deg(),
+                        );
+                        gfx.renderer.set_camera_look_dir(new_look);
+                    }
+                }
+            }
+        }
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
@@ -2970,20 +3071,55 @@ pub fn update_game(
         Some(e) => e.eye_position(partial_tick),
         None => {
             let (rider_feet, vehicle_is_boat) = if let Some(vehicle_id) = game.riding_vehicle_id {
+                let count = game
+                    .vehicle_passengers
+                    .get(&vehicle_id)
+                    .map_or(1, |p| p.len());
                 let seat_idx = game
                     .vehicle_passengers
                     .get(&vehicle_id)
                     .and_then(|p| p.iter().position(|&id| id == game.player.entity_id))
                     .unwrap_or(0);
                 if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
-                    let v_pos = vehicle.prev_position.lerp(vehicle.position, partial_tick as f64);
-                    let v_yaw = lerp_angle(vehicle.prev_body_y_rot_deg, vehicle.body_y_rot_deg, partial_tick);
-                    let height = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
-                    (Some(v_pos + passenger_attachment_offset(vehicle.entity_type, height, seat_idx, v_yaw)), is_boat(vehicle.entity_type))
+                    let v_pos = vehicle
+                        .prev_position
+                        .lerp(vehicle.position, partial_tick as f64);
+                    let v_yaw = lerp_angle(
+                        vehicle.prev_body_y_rot_deg,
+                        vehicle.body_y_rot_deg,
+                        partial_tick,
+                    );
+                    let height =
+                        crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
+                    (
+                        Some(
+                            v_pos
+                                + passenger_attachment_offset(
+                                    vehicle.entity_type,
+                                    height,
+                                    seat_idx,
+                                    count,
+                                    false,
+                                    v_yaw,
+                                ),
+                        ),
+                        is_boat(vehicle.entity_type),
+                    )
                 } else if let Some(pos) = game.entity_positions.get(&vehicle_id) {
-                    let kind = game.entity_kinds.get(&vehicle_id).copied().unwrap_or(EntityKind::ArmorStand);
+                    let kind = game
+                        .entity_kinds
+                        .get(&vehicle_id)
+                        .copied()
+                        .unwrap_or(EntityKind::ArmorStand);
                     let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                    (Some(*pos + passenger_attachment_offset(kind, height, seat_idx, 0.0)), is_boat(kind))
+                    (
+                        Some(
+                            *pos + passenger_attachment_offset(
+                                kind, height, seat_idx, count, false, 0.0,
+                            ),
+                        ),
+                        is_boat(kind),
+                    )
                 } else {
                     (None, false)
                 }
@@ -3791,8 +3927,11 @@ pub fn update_game(
         for item in game.menu_slots() {
             if let azalea_inventory::ItemStack::Present(data) = item {
                 if data.kind == azalea_registry::builtin::ItemKind::PlayerHead {
-                    if let Some(profile) = data.get_component::<azalea_inventory::components::Profile>() {
-                        let (id, name, textures, _) = crate::ui::common::profile_head_info(&profile);
+                    if let Some(profile) =
+                        data.get_component::<azalea_inventory::components::Profile>()
+                    {
+                        let (id, name, textures, _) =
+                            crate::ui::common::profile_head_info(&profile);
                         core.request_head_profile(id, name, textures);
                     }
                 }
@@ -4320,10 +4459,8 @@ pub fn update_game(
 
     if let Some(editor) = game.sign_editor.as_mut() {
         let fs = common::FONT_SIZE * gs;
-        let finish_typing = editor.handle_text_input(
-            &text_events,
-            &|s| gfx.renderer.menu_text_width(s, fs),
-        );
+        let finish_typing =
+            editor.handle_text_input(&text_events, &|s| gfx.renderer.menu_text_width(s, fs));
         let submitted = editor.build(
             &mut elements,
             sw,
@@ -4408,14 +4545,15 @@ pub fn update_game(
         // Vanilla `LevelExtractor` skips the camera entity unless the camera
         // is detached.
         let first_person = gfx.renderer.is_first_person();
-        let passenger_map: HashMap<i32, (i32, usize)> = game
+        let passenger_map: HashMap<i32, (i32, usize, usize)> = game
             .vehicle_passengers
             .iter()
             .flat_map(|(&vid, passengers)| {
+                let count = passengers.len();
                 passengers
                     .iter()
                     .enumerate()
-                    .map(move |(idx, &pid)| (pid, (vid, idx)))
+                    .map(move |(idx, &pid)| (pid, (vid, idx, count)))
             })
             .collect();
         game.entity_store
@@ -4424,16 +4562,41 @@ pub fn update_game(
             .filter(|&(&id, _)| !(first_person && game.camera_entity == Some(id)))
             .map(|(&entity_id, e)| {
                 let is_passenger = passenger_map.contains_key(&entity_id);
-                let interp_pos = if let Some(&(vid, seat_idx)) = passenger_map.get(&entity_id) {
+                let interp_pos = if let Some(&(vid, seat_idx, count)) =
+                    passenger_map.get(&entity_id)
+                {
+                    let is_animal = crate::entity::is_animal(e.entity_type);
                     if let Some(vehicle) = game.entity_store.living.get(&vid) {
-                        let v_pos = vehicle.prev_position.lerp(vehicle.position, partial_tick as f64);
-                        let v_yaw = lerp_angle(vehicle.prev_body_y_rot_deg, vehicle.body_y_rot_deg, partial_tick);
-                        let height = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
-                        v_pos + passenger_attachment_offset(vehicle.entity_type, height, seat_idx, v_yaw)
+                        let v_pos = vehicle
+                            .prev_position
+                            .lerp(vehicle.position, partial_tick as f64);
+                        let v_yaw = lerp_angle(
+                            vehicle.prev_body_y_rot_deg,
+                            vehicle.body_y_rot_deg,
+                            partial_tick,
+                        );
+                        let height =
+                            crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type)
+                                .height;
+                        v_pos
+                            + passenger_attachment_offset(
+                                vehicle.entity_type,
+                                height,
+                                seat_idx,
+                                count,
+                                is_animal,
+                                v_yaw,
+                            )
                     } else if let Some(pos) = game.entity_positions.get(&vid) {
-                        let kind = game.entity_kinds.get(&vid).copied().unwrap_or(EntityKind::ArmorStand);
+                        let kind = game
+                            .entity_kinds
+                            .get(&vid)
+                            .copied()
+                            .unwrap_or(EntityKind::ArmorStand);
                         let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                        *pos + passenger_attachment_offset(kind, height, seat_idx, 0.0)
+                        *pos + passenger_attachment_offset(
+                            kind, height, seat_idx, count, is_animal, 0.0,
+                        )
                     } else {
                         e.prev_position.lerp(e.position, partial_tick as f64)
                     }
@@ -4483,10 +4646,15 @@ pub fn update_game(
                             .x_rot_deg()
                             .lerp(e.look_dir.x_rot_deg(), partial_tick),
                     ),
-                    body_y_rot_deg: if let Some(&(vid, _)) = passenger_map.get(&entity_id) {
+                    body_y_rot_deg: if let Some(&(vid, _, _)) = passenger_map.get(&entity_id) {
                         if let Some(vehicle) = game.entity_store.living.get(&vid) {
-                            let v_yaw = lerp_angle(vehicle.prev_body_y_rot_deg, vehicle.body_y_rot_deg, partial_tick);
-                            let body_yaw = lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick);
+                            let v_yaw = lerp_angle(
+                                vehicle.prev_body_y_rot_deg,
+                                vehicle.body_y_rot_deg,
+                                partial_tick,
+                            );
+                            let body_yaw =
+                                lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick);
                             let diff = (body_yaw - v_yaw + 180.0).rem_euclid(360.0) - 180.0;
                             v_yaw + diff.clamp(-85.0, 85.0)
                         } else {
@@ -4584,25 +4752,52 @@ pub fn update_game(
     );
     if game.camera_entity.is_none() && (shown || !benchmark_running && !finished && !spectating) {
         let interp_pos = if let Some(vehicle_id) = game.riding_vehicle_id {
+            let count = game
+                .vehicle_passengers
+                .get(&vehicle_id)
+                .map_or(1, |p| p.len());
             let seat_idx = game
                 .vehicle_passengers
                 .get(&vehicle_id)
                 .and_then(|p| p.iter().position(|&id| id == game.player.entity_id))
                 .unwrap_or(0);
             if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
-                let v_pos = vehicle.prev_position.lerp(vehicle.position, partial_tick as f64);
-                let v_yaw = lerp_angle(vehicle.prev_body_y_rot_deg, vehicle.body_y_rot_deg, partial_tick);
-                let height = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
-                v_pos + passenger_attachment_offset(vehicle.entity_type, height, seat_idx, v_yaw)
+                let v_pos = vehicle
+                    .prev_position
+                    .lerp(vehicle.position, partial_tick as f64);
+                let v_yaw = lerp_angle(
+                    vehicle.prev_body_y_rot_deg,
+                    vehicle.body_y_rot_deg,
+                    partial_tick,
+                );
+                let height =
+                    crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
+                v_pos
+                    + passenger_attachment_offset(
+                        vehicle.entity_type,
+                        height,
+                        seat_idx,
+                        count,
+                        false,
+                        v_yaw,
+                    )
             } else if let Some(pos) = game.entity_positions.get(&vehicle_id) {
-                let kind = game.entity_kinds.get(&vehicle_id).copied().unwrap_or(EntityKind::ArmorStand);
+                let kind = game
+                    .entity_kinds
+                    .get(&vehicle_id)
+                    .copied()
+                    .unwrap_or(EntityKind::ArmorStand);
                 let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                *pos + passenger_attachment_offset(kind, height, seat_idx, 0.0)
+                *pos + passenger_attachment_offset(kind, height, seat_idx, count, false, 0.0)
             } else {
-                game.player.prev_position.lerp(game.player.position, partial_tick as f64)
+                game.player
+                    .prev_position
+                    .lerp(game.player.position, partial_tick as f64)
             }
         } else {
-            game.player.prev_position.lerp(game.player.position, partial_tick as f64)
+            game.player
+                .prev_position
+                .lerp(game.player.position, partial_tick as f64)
         };
 
         let interp_y_rot_deg = lerp_angle(
@@ -4739,7 +4934,9 @@ pub fn update_game(
                 let id = block_state_data.id();
                 let props = block_state_data.properties();
                 let light = block_lighter::light_coords(&world_light, [pos.x, pos.y, pos.z]);
-                crate::world::block_entity::parse_sign_render_info(*pos, be.kind, &be.nbt, id, props, light)
+                crate::world::block_entity::parse_sign_render_info(
+                    *pos, be.kind, &be.nbt, id, props, light,
+                )
             })
             .collect()
     };
@@ -4840,14 +5037,15 @@ pub fn update_game(
                 Some(crate::player::interaction::HitResult::Entity(e)) => Some(e.entity_id),
                 _ => None,
             };
-            let passenger_map: HashMap<i32, (i32, usize)> = game
+            let passenger_map: HashMap<i32, (i32, usize, usize)> = game
                 .vehicle_passengers
                 .iter()
                 .flat_map(|(&vid, passengers)| {
+                    let count = passengers.len();
                     passengers
                         .iter()
                         .enumerate()
-                        .map(move |(idx, &pid)| (pid, (vid, idx)))
+                        .map(move |(idx, &pid)| (pid, (vid, idx, count)))
                 })
                 .collect();
             let mut list = Vec::new();
@@ -4861,23 +5059,56 @@ pub fn update_game(
                         continue;
                     }
                 }
-                let extras =
-                    entity_extras(entity_id, entity, partial_tick, game.sky_state.game_time as i64);
-                let interp_pos = if let Some(&(vid, seat_idx)) = passenger_map.get(&entity_id) {
+                let extras = entity_extras(
+                    entity_id,
+                    entity,
+                    partial_tick,
+                    game.sky_state.game_time as i64,
+                );
+                let interp_pos = if let Some(&(vid, seat_idx, count)) =
+                    passenger_map.get(&entity_id)
+                {
+                    let is_animal = crate::entity::is_animal(entity.entity_type);
                     if let Some(vehicle) = game.entity_store.living.get(&vid) {
-                        let v_pos = vehicle.prev_position.lerp(vehicle.position, partial_tick as f64);
-                        let v_yaw = lerp_angle(vehicle.prev_body_y_rot_deg, vehicle.body_y_rot_deg, partial_tick);
-                        let height = crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type).height;
-                        v_pos + passenger_attachment_offset(vehicle.entity_type, height, seat_idx, v_yaw)
+                        let v_pos = vehicle
+                            .prev_position
+                            .lerp(vehicle.position, partial_tick as f64);
+                        let v_yaw = lerp_angle(
+                            vehicle.prev_body_y_rot_deg,
+                            vehicle.body_y_rot_deg,
+                            partial_tick,
+                        );
+                        let height =
+                            crate::entity::dimensions::EntityDimensions::of(vehicle.entity_type)
+                                .height;
+                        v_pos
+                            + passenger_attachment_offset(
+                                vehicle.entity_type,
+                                height,
+                                seat_idx,
+                                count,
+                                is_animal,
+                                v_yaw,
+                            )
                     } else if let Some(pos) = game.entity_positions.get(&vid) {
-                        let kind = game.entity_kinds.get(&vid).copied().unwrap_or(EntityKind::ArmorStand);
+                        let kind = game
+                            .entity_kinds
+                            .get(&vid)
+                            .copied()
+                            .unwrap_or(EntityKind::ArmorStand);
                         let height = crate::entity::dimensions::EntityDimensions::of(kind).height;
-                        *pos + passenger_attachment_offset(kind, height, seat_idx, 0.0)
+                        *pos + passenger_attachment_offset(
+                            kind, height, seat_idx, count, is_animal, 0.0,
+                        )
                     } else {
-                        entity.prev_position.lerp(entity.position, partial_tick as f64)
+                        entity
+                            .prev_position
+                            .lerp(entity.position, partial_tick as f64)
                     }
                 } else {
-                    entity.prev_position.lerp(entity.position, partial_tick as f64)
+                    entity
+                        .prev_position
+                        .lerp(entity.position, partial_tick as f64)
                 } + extras.render_offset;
                 if let Some(uuid) = entity.player_uuid {
                     if uuid == core.user.uuid {
@@ -4886,10 +5117,12 @@ pub fn update_game(
                     let Some(player) = game.tab_list.players.get(&uuid) else {
                         continue;
                     };
-                    let pos = interp_pos
-                        + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
+                    let pos =
+                        interp_pos + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
                     let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
-                    let spans = game.scoreboard.player_name(&player.name, player.display_name.as_deref());
+                    let spans = game
+                        .scoreboard
+                        .player_name(&player.name, player.display_name.as_deref());
                     list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
                         position: *pos,
                         spans,
@@ -4906,7 +5139,8 @@ pub fn update_game(
                     } else {
                         64.0
                     };
-                    let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+                    let height =
+                        crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
                     let pos = interp_pos + glam::DVec3::Y * (height as f64 + 0.5);
                     list.push(crate::renderer::pipelines::nameplate::NameplateRenderInfo {
                         position: *pos,
@@ -4924,7 +5158,8 @@ pub fn update_game(
                     } else {
                         64.0
                     };
-                    let height = crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
+                    let height =
+                        crate::entity::dimensions::EntityDimensions::of(entity.entity_type).height;
                     let pos = interp_pos + glam::DVec3::Y * (height as f64 + 0.5);
                     let spans = vec![crate::ui::text::TextSpan::new(
                         name.clone(),

@@ -1645,11 +1645,7 @@ impl AppCore {
                         extract_face_8x8(&data.pixels, data.width, data.height),
                         extract_face_8x8_with_hat(&data.pixels, data.width, data.height, false),
                     ) {
-                        (Some(hat), Some(base)) => HeadState::Ready {
-                            hat,
-                            base,
-                            head_3d,
-                        },
+                        (Some(hat), Some(base)) => HeadState::Ready { hat, base, head_3d },
                         _ => HeadState::Fallback,
                     }
                 }
@@ -3717,6 +3713,20 @@ impl AppCore {
             vehicle,
         );
         Self::tick_controlled_vehicle(game, input, connection);
+        if let Some(vehicle_id) = game.controlled_vehicle_id {
+            if let Some(vehicle) = game.entity_store.living.get(&vehicle_id) {
+                if crate::entity::is_boat(vehicle.entity_type) {
+                    let delta = vehicle.boat_sim.delta_rotation;
+                    if delta != 0.0 {
+                        let cam_look = renderer.camera_look_dir();
+                        let new_look =
+                            LookDirection::new(cam_look.y_rot_deg() + delta, cam_look.x_rot_deg());
+                        renderer.set_camera_look_dir(new_look);
+                        game.player.look_dir = new_look;
+                    }
+                }
+            }
+        }
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
@@ -3864,7 +3874,10 @@ impl AppCore {
         };
 
         if crate::entity::is_equine(&vehicle.entity_type) {
-            if vehicle.equipment(azalea_inventory::components::EquipmentSlot::Saddle).is_none() {
+            if vehicle
+                .equipment(azalea_inventory::components::EquipmentSlot::Saddle)
+                .is_none()
+            {
                 return;
             }
             let player_yaw = game.player.look_dir.y_rot_deg();
@@ -3892,7 +3905,11 @@ impl AppCore {
                 .unwrap_or(0.225);
 
             let friction = 0.6f64;
-            let f = if vehicle.on_ground { friction * 0.91 } else { 0.91 };
+            let f = if vehicle.on_ground {
+                friction * 0.91
+            } else {
+                0.91
+            };
             let f1 = if vehicle.on_ground {
                 speed * (0.21600002 / (f * f * f))
             } else {
@@ -3955,15 +3972,17 @@ impl AppCore {
                 vehicle.velocity.y = 0.0;
                 if was_in_air {
                     use azalea_protocol::packets::game::s_player_command as cmd;
-                    connection
-                        .packet_tx
-                        .send(azalea_protocol::packets::game::ServerboundGamePacket::PlayerCommand(
+                    connection.packet_tx.send(
+                        azalea_protocol::packets::game::ServerboundGamePacket::PlayerCommand(
                             cmd::ServerboundPlayerCommand {
-                                id: azalea_core::entity_id::MinecraftEntityId(game.player.entity_id),
+                                id: azalea_core::entity_id::MinecraftEntityId(
+                                    game.player.entity_id,
+                                ),
                                 action: cmd::Action::StopRidingJump,
                                 data: 0,
                             },
-                        ));
+                        ),
+                    );
                 }
             }
             vehicle.velocity.x *= f;
@@ -4019,6 +4038,12 @@ impl AppCore {
                     vehicle.look_dir.x_rot_deg(),
                     vehicle.on_ground,
                 ));
+                if crate::entity::is_boat(vehicle.entity_type) {
+                    sender.send_raw(pomme_protocol::wire::encode_paddle_boat(
+                        vehicle.boat_sim.paddle_state[0],
+                        vehicle.boat_sim.paddle_state[1],
+                    ));
+                }
                 return;
             }
         }

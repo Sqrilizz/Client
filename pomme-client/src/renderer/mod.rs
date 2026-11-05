@@ -41,11 +41,11 @@ use pipelines::entity_shadow::{EntityShadowPipeline, ShadowScene};
 use pipelines::hand::HandPipeline;
 use pipelines::lightmap::{Lightmap, LightmapInfo};
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline, SpriteId};
+use pipelines::nameplate::{NameplatePipeline, NameplateRenderInfo};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
-use pipelines::sign_text::SignTextPipeline;
-use pipelines::nameplate::{NameplatePipeline, NameplateRenderInfo};
 use pipelines::post_effect::{PostEffect, PostEffects};
+use pipelines::sign_text::SignTextPipeline;
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
@@ -1181,6 +1181,10 @@ impl Renderer {
         self.camera.reset(position, look_dir);
     }
 
+    pub fn set_camera_look_dir(&mut self, look_dir: LookDirection) {
+        self.camera.set_look_dir(look_dir);
+    }
+
     pub fn set_top_down_radius(&mut self, radius_blocks: f32) {
         self.camera.frame_top_down(radius_blocks);
     }
@@ -1226,9 +1230,21 @@ impl Renderer {
                     let step_y = if dir.y > 0.0 { 1 } else { -1 };
                     let step_z = if dir.z > 0.0 { 1 } else { -1 };
 
-                    let t_delta_x = if dir.x != 0.0 { (1.0 / dir.x).abs() } else { f64::INFINITY };
-                    let t_delta_y = if dir.y != 0.0 { (1.0 / dir.y).abs() } else { f64::INFINITY };
-                    let t_delta_z = if dir.z != 0.0 { (1.0 / dir.z).abs() } else { f64::INFINITY };
+                    let t_delta_x = if dir.x != 0.0 {
+                        (1.0 / dir.x).abs()
+                    } else {
+                        f64::INFINITY
+                    };
+                    let t_delta_y = if dir.y != 0.0 {
+                        (1.0 / dir.y).abs()
+                    } else {
+                        f64::INFINITY
+                    };
+                    let t_delta_z = if dir.z != 0.0 {
+                        (1.0 / dir.z).abs()
+                    } else {
+                        f64::INFINITY
+                    };
 
                     let mut t_max_x = if dir.x > 0.0 {
                         (bx as f64 + 1.0 - origin.x) * t_delta_x
@@ -1257,7 +1273,8 @@ impl Renderer {
                         let state = chunks.get_block_state(bx, by, bz);
                         let block_state_data = block_state_table.block_state_data(state);
                         if !block_state_data.is_air() {
-                            let outline = crate::physics::block_shape::outline_shape(block_state_data);
+                            let outline =
+                                crate::physics::block_shape::outline_shape(block_state_data);
                             let shape_offset = block_state_data.outline_shape_position(bx, by, bz);
                             if let Some((hit_point, _)) = crate::player::interaction::clip_shape(
                                 origin,
@@ -2084,7 +2101,13 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(&encoder, bake);
         }
 
-        if let RenderMode::World { particles, sign_texts, nameplates, .. } = &mode {
+        if let RenderMode::World {
+            particles,
+            sign_texts,
+            nameplates,
+            ..
+        } = &mode
+        {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
             self.sign_text_pipeline.prepare(

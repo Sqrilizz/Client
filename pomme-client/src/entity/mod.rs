@@ -7,8 +7,6 @@ pub mod shadow;
 pub mod text_display;
 pub mod villager;
 
-pub use text_display::TextDisplayStore;
-
 use std::collections::HashMap;
 
 use azalea_inventory::ItemStack;
@@ -16,6 +14,7 @@ use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::EntityKind;
 use dimensions::EntityDimensions;
 use glam::DVec3;
+pub use text_display::TextDisplayStore;
 
 use crate::attribute::AttributeMap;
 use crate::entity::components::{LookDirection, Position};
@@ -2107,8 +2106,15 @@ impl EntityStore {
                 entity.is_standing = f & 0x20 != 0;
                 entity.is_open_mouth = f & 0x40 != 0;
                 if f & 0x04 != 0 && entity.equipment(EquipmentSlot::Saddle).is_none() {
-                    entity.set_equipment(EquipmentSlot::Saddle, ItemStack::new(azalea_registry::builtin::ItemKind::Saddle, 1));
-                } else if f & 0x04 == 0 && entity.equipment(EquipmentSlot::Saddle).is_some_and(|s| s.kind() == azalea_registry::builtin::ItemKind::Saddle) {
+                    entity.set_equipment(
+                        EquipmentSlot::Saddle,
+                        ItemStack::new(azalea_registry::builtin::ItemKind::Saddle, 1),
+                    );
+                } else if f & 0x04 == 0
+                    && entity
+                        .equipment(EquipmentSlot::Saddle)
+                        .is_some_and(|s| s.kind() == azalea_registry::builtin::ItemKind::Saddle)
+                {
                     entity.set_equipment(EquipmentSlot::Saddle, ItemStack::Empty);
                 }
             }
@@ -2556,6 +2562,50 @@ pub fn is_equine(kind: &EntityKind) -> bool {
 pub fn is_boat(kind: EntityKind) -> bool {
     let s = kind.to_str();
     s.ends_with("_boat") || s.ends_with("_raft")
+}
+
+pub fn is_raft(kind: EntityKind) -> bool {
+    kind.to_str().ends_with("_raft")
+}
+
+pub fn is_chest_boat(kind: EntityKind) -> bool {
+    let s = kind.to_str();
+    s.contains("chest_boat") || s.contains("chest_raft")
+}
+
+pub fn is_animal(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Pig
+            | EntityKind::Cow
+            | EntityKind::Sheep
+            | EntityKind::Chicken
+            | EntityKind::Wolf
+            | EntityKind::Ocelot
+            | EntityKind::Cat
+            | EntityKind::Horse
+            | EntityKind::Donkey
+            | EntityKind::Mule
+            | EntityKind::SkeletonHorse
+            | EntityKind::ZombieHorse
+            | EntityKind::Llama
+            | EntityKind::TraderLlama
+            | EntityKind::Camel
+            | EntityKind::CamelHusk
+            | EntityKind::Fox
+            | EntityKind::Panda
+            | EntityKind::PolarBear
+            | EntityKind::Rabbit
+            | EntityKind::Turtle
+            | EntityKind::Bee
+            | EntityKind::Strider
+            | EntityKind::Goat
+            | EntityKind::Axolotl
+            | EntityKind::Frog
+            | EntityKind::Sniffer
+            | EntityKind::Armadillo
+            | EntityKind::Mooshroom
+    )
 }
 
 pub fn is_llama(kind: EntityKind) -> bool {
