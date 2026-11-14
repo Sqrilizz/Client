@@ -4519,6 +4519,7 @@ dependencies = [
 name = "pomme-android"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pomme-client",
 ]
 

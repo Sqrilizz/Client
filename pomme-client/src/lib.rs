@@ -1,6 +1,7 @@
 // Per-thread-heap allocator (see Cargo.toml): keeps the chunk-mesh worker
 // pool's cross-thread Vec churn from serializing on the system heap's global
 // lock and stalling the main thread.
+#[cfg(not(target_os = "android"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -89,7 +90,10 @@ pub fn run(args: LaunchArgs, platform: Platform) {
     // OS, so a chunk-load spike lingers; 10 ms (v2's default) returns it
     // promptly without purging on every free. The bindings don't name
     // `mi_option_purge_delay`; it is option 15 in both v2 and v3.
-    unsafe { libmimalloc_sys::mi_option_set(15, 10) };
+    #[cfg(not(target_os = "android"))]
+    unsafe {
+        libmimalloc_sys::mi_option_set(15, 10)
+    };
     #[cfg(target_os = "macos")]
     use_bundled_moltenvk();
     if let Some(root) = platform.data_root {
