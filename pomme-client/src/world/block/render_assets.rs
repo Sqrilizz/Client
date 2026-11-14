@@ -6,7 +6,8 @@ use std::sync::{Arc, OnceLock};
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
+    ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion, ItemModel, MapColor,
+    PotionContents,
 };
 use azalea_registry::Registry as AzaleaRegistry;
 use azalea_registry::builtin::{ItemKind, MobEffect, Potion};
@@ -270,7 +271,81 @@ impl BlockRenderAssets {
 
     /// The model `name` draws with for this stack: its loaded variant
     /// (vanilla `Charge` select property) if it bakes one, else `name`.
+    fn resolve_custom_model_key(&self, name: &str, stack: &ItemStackData) -> Option<String> {
+        if let Some(item_model) = stack.get_component::<ItemModel>() {
+            let loc = &item_model.resource_location;
+            let ns = loc.namespace();
+            let path = loc.path();
+            let mut candidates = Vec::with_capacity(6);
+            if ns != "minecraft" {
+                candidates.push(format!("{ns}:{path}"));
+                if let Some(sub) = path.strip_prefix("item/") {
+                    candidates.push(format!("{ns}:{sub}"));
+                } else {
+                    candidates.push(format!("{ns}:item/{path}"));
+                }
+                candidates.push(path.to_string());
+                if let Some(sub) = path.strip_prefix("item/") {
+                    candidates.push(sub.to_string());
+                }
+            } else {
+                candidates.push(path.to_string());
+                if let Some(sub) = path.strip_prefix("item/") {
+                    candidates.push(sub.to_string());
+                }
+                candidates.push(format!("minecraft:{path}"));
+                if let Some(sub) = path.strip_prefix("item/") {
+                    candidates.push(format!("minecraft:{sub}"));
+                }
+            }
+            for candidate in candidates {
+                if self.item_models.contains_key(&candidate)
+                    || self.flat_item_texture_keys.contains_key(&candidate)
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        if let Some(cmd) = stack.get_component::<CustomModelData>() {
+            for s in &cmd.strings {
+                let candidates = [
+                    s.as_str(),
+                    s.strip_prefix("minecraft:").unwrap_or(s),
+                ];
+                for candidate in candidates {
+                    if self.item_models.contains_key(candidate)
+                        || self.flat_item_texture_keys.contains_key(candidate)
+                    {
+                        return Some(candidate.to_string());
+                    }
+                }
+            }
+            if let Some(&first_float) = cmd.floats.first() {
+                let int_val = first_float as i64;
+                let candidates = [
+                    format!("{name}_{int_val}"),
+                    format!("{name}#{int_val}"),
+                    format!("{name}_{first_float:.0}"),
+                    format!("{int_val}"),
+                ];
+                for candidate in &candidates {
+                    if self.item_models.contains_key(candidate)
+                        || self.flat_item_texture_keys.contains_key(candidate)
+                    {
+                        return Some(candidate.clone());
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn stack_model_key(&self, name: &str, stack: &ItemStackData) -> String {
+        let base = self
+            .resolve_custom_model_key(name, stack)
+            .unwrap_or_else(|| name.to_string());
         let charge = stack
             .get_component::<ChargedProjectiles>()
             .filter(|c| !c.items.is_empty())
@@ -278,12 +353,15 @@ impl BlockRenderAssets {
                 let rocket = c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket);
                 if rocket { "rocket" } else { "arrow" }
             });
-        charge
-            .map(|charge| model::charge_model_key(name, charge))
-            .filter(|key| {
-                self.item_models.contains_key(key) || self.flat_item_texture_keys.contains_key(key)
-            })
-            .unwrap_or_else(|| name.to_string())
+        if let Some(charge) = charge {
+            let charge_key = model::charge_model_key(&base, charge);
+            if self.item_models.contains_key(&charge_key)
+                || self.flat_item_texture_keys.contains_key(&charge_key)
+            {
+                return charge_key;
+            }
+        }
+        base
     }
 
     /// Every item with a baked 3D model or a generated flat sprite.
@@ -824,5 +902,83 @@ mod tint_tests {
         ] {
             assert_eq!(evaluate_item_tint(&source, None, None), 0xFF112233);
         }
+    }
+}
+
+#[cfg(test)]
+mod stack_model_tests {
+    use azalea_inventory::ItemStack;
+    use azalea_inventory::components::{CustomModelData, ItemModel};
+    use azalea_registry::identifier::Identifier;
+
+    use super::*;
+
+    #[test]
+    fn item_model_component_overrides_base_name() {
+        let mut assets = BlockRenderAssets::default();
+        assets
+            .flat_item_texture_keys
+            .insert("hopneo:pickaxe".to_string(), vec![Some("hopneo:item/pickaxe".to_string())]);
+
+        let stack = ItemStack::from(ItemKind::NetheritePickaxe).with_component(ItemModel {
+            resource_location: Identifier::new("hopneo:pickaxe"),
+        });
+        let stack = stack.as_present().unwrap();
+
+        assert_eq!(
+            assets.stack_model_key("netherite_pickaxe", stack),
+            "hopneo:pickaxe"
+        );
+    }
+
+    #[test]
+    fn item_model_with_item_prefix_overrides_base_name() {
+        let mut assets = BlockRenderAssets::default();
+        assets
+            .flat_item_texture_keys
+            .insert("hopneo:barrier".to_string(), vec![Some("hopneo:item/barrier".to_string())]);
+
+        let stack = ItemStack::from(ItemKind::Barrier).with_component(ItemModel {
+            resource_location: Identifier::new("hopneo:item/barrier"),
+        });
+        let stack = stack.as_present().unwrap();
+
+        assert_eq!(
+            assets.stack_model_key("barrier", stack),
+            "hopneo:barrier"
+        );
+    }
+
+    #[test]
+    fn custom_model_data_string_overrides_base_name() {
+        let mut assets = BlockRenderAssets::default();
+        assets
+            .flat_item_texture_keys
+            .insert("custom:tool".to_string(), vec![Some("custom:item/tool".to_string())]);
+
+        let stack = ItemStack::from(ItemKind::IronPickaxe).with_component(CustomModelData {
+            floats: vec![],
+            flags: vec![],
+            strings: vec!["custom:tool".to_string()],
+            colors: vec![],
+        });
+        let stack = stack.as_present().unwrap();
+
+        assert_eq!(
+            assets.stack_model_key("iron_pickaxe", stack),
+            "custom:tool"
+        );
+    }
+
+    #[test]
+    fn plain_stack_keeps_base_name() {
+        let assets = BlockRenderAssets::default();
+        let stack = ItemStack::from(ItemKind::NetheritePickaxe);
+        let stack = stack.as_present().unwrap();
+
+        assert_eq!(
+            assets.stack_model_key("netherite_pickaxe", stack),
+            "netherite_pickaxe"
+        );
     }
 }

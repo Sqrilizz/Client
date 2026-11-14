@@ -44,17 +44,24 @@ fn event(packet: ContainerPacket) -> Option<NetworkEvent> {
                 tracing::debug!("Ignoring a screen with unknown menu {menu}");
                 return None;
             };
-            let title = match super::chat::read_component(&title, &mut 0) {
-                Ok(title) => title.plain_text(),
+            let (title, title_spans) = match super::chat::read_component(&title, &mut 0) {
+                Ok(title) => (
+                    title.plain_text(),
+                    crate::ui::text::format_component_spans(
+                        &title,
+                        crate::ui::common::SLOT_LABEL_COLOR,
+                    ),
+                ),
                 Err(e) => {
                     tracing::debug!("Unreadable screen title: {e}");
-                    String::new()
+                    (String::new(), Vec::new())
                 }
             };
             NetworkEvent::OpenScreen {
                 container_id,
                 menu_type,
                 title,
+                title_spans,
             }
         }
         ContainerPacket::Content {

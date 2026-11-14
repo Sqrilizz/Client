@@ -242,7 +242,7 @@ impl App {
         quick_play: Option<QuickPlay>,
         window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
-        let pending_skin_uuid = user.has_profile.then_some(user.uuid);
+        let pending_skin_uuid = Some(user.uuid);
         let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size);
         Self {
             phase: StateSlot::new(AppPhase::Setup {
@@ -414,8 +414,14 @@ impl App {
                 }
 
                 if let Some(uuid) = pending_skin_uuid.take() {
-                    renderer.load_player_skin(&uuid, &self.core.tokio_rt);
-                    self.core.menu.set_player_face(Some(&uuid));
+                    renderer.load_user_skin(
+                        &uuid,
+                        Some(&self.core.user.username),
+                        &self.core.tokio_rt,
+                    );
+                    if self.core.user.has_profile {
+                        self.core.menu.set_player_face(Some(&uuid));
+                    }
                 }
 
                 self.core.apply_cursor_grab(&window, None);

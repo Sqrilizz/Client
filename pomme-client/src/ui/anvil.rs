@@ -104,6 +104,7 @@ pub fn build_anvil(
     slots: &[ItemStack],
     data: &[i16],
     title: &str,
+    title_spans: &[crate::ui::text::TextSpan],
     state: &AnvilState,
     experience_level: i32,
     creative: bool,
@@ -121,7 +122,11 @@ pub fn build_anvil(
         166.0,
         SpriteId::AnvilBackground,
     );
-    panel.label(elements, 60.0, 6.0, title);
+    if title_spans.is_empty() {
+        panel.label(elements, 60.0, 6.0, title);
+    } else {
+        panel.label_spans(elements, 60.0, 6.0, title_spans);
+    }
     panel.inventory_label(elements, 72.0);
 
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);

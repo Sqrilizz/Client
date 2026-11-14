@@ -88,6 +88,21 @@ impl Panel {
         });
     }
 
+    pub fn label_spans(
+        &self,
+        elements: &mut Vec<MenuElement>,
+        x: f32,
+        y: f32,
+        spans: &[crate::ui::text::TextSpan],
+    ) {
+        elements.push(MenuElement::TextSpansFlat {
+            x: self.ox + x * self.scale,
+            y: self.oy + y * self.scale,
+            spans: spans.to_vec(),
+            scale: FONT_SIZE * self.scale,
+        });
+    }
+
     /// An untinted sprite at a GUI-unit rectangle.
     pub fn image(
         &self,

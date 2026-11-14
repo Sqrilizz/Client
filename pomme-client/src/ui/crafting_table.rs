@@ -47,6 +47,7 @@ pub fn build_crafting_table(
     input: &ContainerInput,
     slots: &[ItemStack],
     title: &str,
+    title_spans: &[crate::ui::text::TextSpan],
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
@@ -55,7 +56,11 @@ pub fn build_crafting_table(
     deferred_cursor: Option<&mut ItemStack>,
 ) -> ContainerResult {
     let panel = push_crafting_table_background(elements, screen_w, screen_h, gs, x_offset);
-    panel.label(elements, 29.0, 6.0, title);
+    if title_spans.is_empty() {
+        panel.label(elements, 29.0, 6.0, title);
+    } else {
+        panel.label_spans(elements, 29.0, 6.0, title_spans);
+    }
     panel.inventory_label(elements, 72.0);
 
     let mut ctx = SlotCtx::new(

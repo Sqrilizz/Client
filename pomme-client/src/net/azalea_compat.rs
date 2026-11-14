@@ -5840,6 +5840,9 @@ fn entity_data_matches_azalea() {
                 assert_eq!(&crate::net::item_codec::to_azalea(stack), az);
             }
             // azalea re-encodes text as a compound; compare what it says.
+            (Value::Component(nbt), EntityDataValue::FormattedText(az)) => {
+                assert_eq!(plain(nbt), az.to_string());
+            }
             (Value::OptionalComponent(Some(nbt)), EntityDataValue::OptionalFormattedText(az)) => {
                 assert_eq!(plain(nbt), az.as_ref().unwrap().to_string());
             }

@@ -46,7 +46,7 @@ impl ModelInputs {
             .map(|(id, resource)| (id, resource.content().clone()))
             .collect();
         let items = resources
-            .list_resources("items", &shallow_minecraft_json)?
+            .list_resources("items", &|id| id.path().ends_with(".json"))?
             .into_iter()
             .map(|(id, resource)| (id, resource.content().clone()))
             .collect();
@@ -914,7 +914,10 @@ pub fn bake_item_models(
     let grass_colormap = Colormap::from_content(inputs.grass_colormap.as_ref());
     let mut model_cache = ModelLoader::new(bundle);
 
-    let mut bake = |name: &str, parts: &[ModelPart]| {
+    let mut bake = |name: &str, parts: &[ModelPart], overwrite: bool| {
+        if !overwrite && (item_models.contains_key(name) || flat_keys.contains_key(name)) {
+            return;
+        }
         let mut merged: Option<BakedModel> = None;
         let mut item_tints = Vec::new();
         // Vanilla applies each composite part's own display transforms. Pomme
@@ -1043,19 +1046,46 @@ pub fn bake_item_models(
         if parts.is_empty() {
             continue;
         }
-        bake(item_name, &parts);
+        let qualified_name = format!("{}:{}", id.namespace(), item_name);
+        bake(&qualified_name, &parts, true);
+        bake(item_name, &parts, id.namespace() == "minecraft");
         for (charge, node) in charge_type_cases(&json) {
             let mut parts = Vec::new();
             collect_parts_from_node(node, None, &mut parts);
-            bake(&charge_model_key(item_name, charge), &parts);
+            bake(&charge_model_key(&qualified_name, charge), &parts, true);
+            bake(&charge_model_key(item_name, charge), &parts, id.namespace() == "minecraft");
         }
-        // The bundle's selected-item model composes these around the
-        // selected stack at draw time.
         if let Some(layers) = selected_bundle_layers(&json) {
             for (front, parts) in [false, true].into_iter().zip(&layers) {
-                bake(&selected_bundle_layer_key(item_name, front), parts);
+                bake(&selected_bundle_layer_key(&qualified_name, front), parts, true);
+                bake(&selected_bundle_layer_key(item_name, front), parts, id.namespace() == "minecraft");
             }
         }
+    }
+
+    for (id, _) in &inputs.models {
+        let Some(item_path) = id
+            .path()
+            .strip_prefix("models/item/")
+            .and_then(|path| path.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let qualified_short = format!("{}:{}", id.namespace(), item_path);
+        let qualified_item = format!("{}:item/{}", id.namespace(), item_path);
+        let part_path = if id.namespace() == "minecraft" {
+            format!("item/{item_path}")
+        } else {
+            qualified_item.clone()
+        };
+        let parts = [ModelPart {
+            path: part_path,
+            transform: None,
+            tints: Vec::new(),
+        }];
+        bake(&qualified_short, &parts, false);
+        bake(&qualified_item, &parts, false);
+        bake(item_path, &parts, false);
     }
 
     // Special renderers' meshes, with their display transforms from the
@@ -1502,11 +1532,21 @@ fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::V
 /// `paletted_permutations` atlas source for its trim textures.
 fn default_stack_branch(mut node: &serde_json::Value) -> &serde_json::Value {
     const COMPONENT_PROPERTIES: [&str; 3] = ["trim_material", "charge_type", "block_state"];
-    while node_type(node) == Some("select")
-        && node_property(node).is_some_and(|property| COMPONENT_PROPERTIES.contains(&property))
-        && let Some(fallback) = node.get("fallback")
-    {
-        node = fallback;
+    loop {
+        if node_type(node) == Some("select")
+            && node_property(node).is_some_and(|property| COMPONENT_PROPERTIES.contains(&property))
+            && let Some(fallback) = node.get("fallback")
+        {
+            node = fallback;
+            continue;
+        }
+        if node_type(node) == Some("condition")
+            && let Some(on_false) = node.get("on_false")
+        {
+            node = on_false;
+            continue;
+        }
+        break;
     }
     node
 }
@@ -1879,7 +1919,18 @@ fn read_model(
     let id = AssetId::parse(model_id)
         .resource_id("models", ".json")
         .ok()?;
-    let contents = read_json(bundle, &id, || inputs.models.get(&id))?;
+    let contents = read_json(bundle, &id, || inputs.models.get(&id)).or_else(|| {
+        let parsed = AssetId::parse(model_id);
+        if !parsed.path.starts_with("item/") && !parsed.path.starts_with("block/") {
+            let fallback_id = ResourceId::from_parts(
+                parsed.namespace,
+                &format!("models/item/{}.json", parsed.path),
+            ).ok()?;
+            read_json(bundle, &fallback_id, || inputs.models.get(&fallback_id))
+        } else {
+            None
+        }
+    })?;
     match serde_json::from_str(&contents) {
         Ok(model) => Some(model),
         Err(error) => {

@@ -26,5 +26,6 @@ pub mod shaderpack;
 pub mod sign_text;
 pub mod skin_preview;
 pub mod sky;
+pub mod text_display;
 pub mod weather;
 pub mod world_text;

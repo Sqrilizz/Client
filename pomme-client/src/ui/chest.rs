@@ -31,6 +31,7 @@ pub fn build_chest(
     rows: u8,
     slots: &[ItemStack],
     title: &str,
+    title_spans: &[crate::ui::text::TextSpan],
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
@@ -56,7 +57,11 @@ pub fn build_chest(
         176.0,
         BOTTOM_TEX_H,
     );
-    panel.label(elements, 8.0, 6.0, title);
+    if title_spans.is_empty() {
+        panel.label(elements, 8.0, 6.0, title);
+    } else {
+        panel.label_spans(elements, 8.0, 6.0, title_spans);
+    }
     panel.inventory_label(elements, rows_h + 20.0);
 
     build_contents(
@@ -99,6 +104,7 @@ pub fn build_grid_screen(
     kind: ContainerKind,
     slots: &[ItemStack],
     title: &str,
+    title_spans: &[crate::ui::text::TextSpan],
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
@@ -135,7 +141,11 @@ pub fn build_grid_screen(
     } else {
         8.0
     };
-    panel.label(elements, title_x, 6.0, title);
+    if title_spans.is_empty() {
+        panel.label(elements, title_x, 6.0, title);
+    } else {
+        panel.label_spans(elements, title_x, 6.0, title_spans);
+    }
     panel.inventory_label(elements, height - 94.0);
 
     build_contents(
@@ -199,4 +209,95 @@ fn build_contents(
         drag,
         last_click,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::text::TextSpan;
+
+    #[test]
+    fn chest_emits_flat_spans_when_title_spans_present() {
+        let mut elements = Vec::new();
+        let input = ContainerInput {
+            left_pressed: false,
+            right_pressed: false,
+            middle_pressed: false,
+            left_held: false,
+            right_held: false,
+            shift: false,
+            hotbar_swap: None,
+            swap_offhand: false,
+            throw: false,
+            throw_all: false,
+        };
+        let mut drag = None;
+        let mut last_click = None;
+        let spans = vec![TextSpan {
+            text: "\u{e682}".into(),
+            color: [1.0, 1.0, 1.0, 1.0],
+            bold: false,
+            italic: false,
+            strikethrough: false,
+            underline: false,
+            obfuscated: false,
+            shadow_color: None,
+            font: Some("hopneo:gui".into()),
+            inline_object: None,
+            component_style: None,
+        }];
+        build_chest(
+            &mut elements,
+            800.0,
+            600.0,
+            (0.0, 0.0),
+            &input,
+            3,
+            &[],
+            "Shop",
+            &spans,
+            &ItemStack::Empty,
+            &mut drag,
+            &mut last_click,
+            1.0,
+        );
+        let has_flat_spans = elements.iter().any(|elem| matches!(elem, MenuElement::TextSpansFlat { spans: s, .. } if s == &spans));
+        assert!(has_flat_spans);
+    }
+
+    #[test]
+    fn chest_emits_flat_text_when_title_spans_empty() {
+        let mut elements = Vec::new();
+        let input = ContainerInput {
+            left_pressed: false,
+            right_pressed: false,
+            middle_pressed: false,
+            left_held: false,
+            right_held: false,
+            shift: false,
+            hotbar_swap: None,
+            swap_offhand: false,
+            throw: false,
+            throw_all: false,
+        };
+        let mut drag = None;
+        let mut last_click = None;
+        build_chest(
+            &mut elements,
+            800.0,
+            600.0,
+            (0.0, 0.0),
+            &input,
+            3,
+            &[],
+            "Chest",
+            &[],
+            &ItemStack::Empty,
+            &mut drag,
+            &mut last_click,
+            1.0,
+        );
+        let has_flat_text = elements.iter().any(|elem| matches!(elem, MenuElement::TextFlat { text, .. } if text == "Chest"));
+        assert!(has_flat_text);
+    }
 }

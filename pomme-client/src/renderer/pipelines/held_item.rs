@@ -28,7 +28,15 @@ pub struct HeldHand<'a> {
     pub main_hand: bool,
     pub right_arm: bool,
     pub swing_progress: f32,
+    pub equip_progress: f32,
     pub use_anim: Option<UseAnim>,
+}
+
+pub struct WorldHand<'a> {
+    pub item: &'a HeldItemInfo,
+    pub right_arm: bool,
+    pub in_use: bool,
+    pub hand: Mat4,
 }
 
 /// An item in a hand of the inventory's player preview (vanilla
@@ -49,6 +57,7 @@ pub enum UseAnim {
     Eat(EatAnim),
     /// A shield held up: its blocking display, without the swing.
     Block,
+    Bow,
 }
 
 /// The inputs to vanilla `applyEatTransform`.
@@ -193,10 +202,11 @@ impl HeldItemPipeline {
             );
             let invert = hand::arm_invert(hand.right_arm);
             let mut arm = match hand.use_anim {
-                Some(UseAnim::Eat(anim)) => eat_item_matrix(anim, invert),
-                Some(UseAnim::Block) if item.name == "shield" => item_arm_matrix(invert),
-                Some(UseAnim::Block) => item_arm_matrix(invert) * block_matrix(invert),
-                None => first_person_item_matrix(hand.swing_progress, invert),
+                Some(UseAnim::Eat(anim)) => eat_item_matrix(anim, invert, hand.equip_progress),
+                Some(UseAnim::Block) if item.name == "shield" => item_arm_matrix(invert, hand.equip_progress),
+                Some(UseAnim::Block) => item_arm_matrix(invert, hand.equip_progress) * block_matrix(invert),
+                Some(UseAnim::Bow) => item_arm_matrix(invert, hand.equip_progress),
+                None => first_person_item_matrix(hand.swing_progress, invert, hand.equip_progress),
             };
             // Vanilla `submitArmWithItem`'s crossbow branch: a charged one
             // held still in the main hand turns toward the crosshair.
@@ -263,6 +273,48 @@ impl HeldItemPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_world_hands(
+        &mut self,
+        device: &rhi::backend::Device,
+        pass: &mut rhi::backend::RenderPassEncoder,
+        frame: usize,
+        uniform: &CameraUniform,
+        hands: &[WorldHand<'_>],
+        meshes: &ItemEntityPipeline,
+        light: LightLevels,
+    ) {
+        self.shared.update_camera(frame, uniform);
+        let tint_count = hands.iter().map(|hand| hand.item.item_tints.len()).sum();
+        self.shared
+            .begin_frame(device, frame, hands.len(), tint_count);
+        self.shared.bind(pass, frame, self.pipeline);
+        for hand in hands {
+            let item = hand.item;
+            let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.model) else {
+                continue;
+            };
+            let default = default_third_person(item.has_3d_model);
+            let display = self.hand_display(
+                THIRD_PERSON_KEYS,
+                item,
+                hand.in_use,
+                default,
+                hand.right_arm,
+            );
+            let instance = self.shared.push_item(
+                frame,
+                &(hand.hand * display.to_matrix()),
+                Mat3::IDENTITY,
+                light.lane(),
+                &item.item_tints,
+                0,
+            );
+            pass.set_vertex_buffer(0, buffer);
+            pass.draw(vertex_count, 1, 0, instance);
+        }
+    }
+
     pub fn recreate_pipeline(
         &mut self,
         device: &rhi::backend::Device,
@@ -281,17 +333,16 @@ impl HeldItemPipeline {
 
 /// Vanilla `ItemInHandRenderer.applyItemArmTransform` (inverseArmHeight 0):
 /// `invert` is [`hand::arm_invert`].
-fn item_arm_matrix(invert: f32) -> Mat4 {
-    Mat4::from_translation(Vec3::new(invert * 0.56, -0.52, -0.72))
+fn item_arm_matrix(invert: f32, equip_progress: f32) -> Mat4 {
+    Mat4::from_translation(Vec3::new(invert * 0.56, -0.52 + (1.0 - equip_progress) * -0.6, -0.72))
 }
 
-// Vanilla ItemInHandRenderer: applyItemArmTransform + swingArm.
-fn first_person_item_matrix(swing_progress: f32, invert: f32) -> Mat4 {
+fn first_person_item_matrix(swing_progress: f32, invert: f32, equip_progress: f32) -> Mat4 {
     let a = swing_progress;
     let sq = a.sqrt();
     let pi = std::f32::consts::PI;
 
-    item_arm_matrix(invert)
+    item_arm_matrix(invert, equip_progress)
         * Mat4::from_translation(Vec3::new(
             invert * -0.4 * (sq * pi).sin(),
             0.2 * (sq * pi * 2.0).sin(),
@@ -303,12 +354,8 @@ fn first_person_item_matrix(swing_progress: f32, invert: f32) -> Mat4 {
         * Mat4::from_rotation_y((invert * -45.0).to_radians())
 }
 
-// Vanilla ItemInHandRenderer: applyEatTransform then applyItemArmTransform
-// (EAT/DRINK skip the usual pre-transform).
-fn eat_item_matrix(anim: EatAnim, invert: f32) -> Mat4 {
+fn eat_item_matrix(anim: EatAnim, invert: f32, equip_progress: f32) -> Mat4 {
     let scaled = anim.curr_usage_time / anim.duration;
-    // The chew bob runs after the first 20% of the eat, oscillating every 4
-    // ticks; the jiggle shoves the item into the mouth over the last bite.
     let bob = if scaled < 0.8 {
         ((anim.curr_usage_time / 4.0 * std::f32::consts::PI).cos() * 0.1).abs()
     } else {
@@ -320,7 +367,7 @@ fn eat_item_matrix(anim: EatAnim, invert: f32) -> Mat4 {
         * Mat4::from_rotation_y((invert * jiggle * 90.0).to_radians())
         * Mat4::from_rotation_x((jiggle * 10.0).to_radians())
         * Mat4::from_rotation_z((invert * jiggle * 30.0).to_radians())
-        * item_arm_matrix(invert)
+        * item_arm_matrix(invert, equip_progress)
 }
 
 /// The fallback first-person display: `block/block.json`'s for the hand, or
@@ -381,17 +428,19 @@ mod tests {
     #[test]
     fn the_left_arm_mirrors_the_right() {
         for swing in [0.0, 0.3, 0.7, 1.0] {
-            assert!(
-                first_person_item_matrix(swing, -1.0)
-                    .abs_diff_eq(mirror(first_person_item_matrix(swing, 1.0)), 1e-5),
-                "swing {swing}"
-            );
+            for equip in [0.0, 0.5, 1.0] {
+                assert!(
+                    first_person_item_matrix(swing, -1.0, equip)
+                        .abs_diff_eq(mirror(first_person_item_matrix(swing, 1.0, equip)), 1e-5),
+                    "swing {swing} equip {equip}"
+                );
+            }
         }
         let anim = EatAnim {
             curr_usage_time: 12.0,
             duration: 32.0,
         };
-        assert!(eat_item_matrix(anim, -1.0).abs_diff_eq(mirror(eat_item_matrix(anim, 1.0)), 1e-5));
+        assert!(eat_item_matrix(anim, -1.0, 1.0).abs_diff_eq(mirror(eat_item_matrix(anim, 1.0, 1.0)), 1e-5));
         let display = default_first_person(false, true);
         assert!(
             display

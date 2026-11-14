@@ -136,6 +136,7 @@ impl ContainerScreen {
 pub struct OpenContainer {
     pub id: i32,
     pub title: String,
+    pub title_spans: Vec<crate::ui::text::TextSpan>,
     #[cfg(feature = "test-harness")]
     pub menu: azalea_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
@@ -390,6 +391,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub display_entity_store: crate::entity::DisplayEntityStore,
     pub particle_store: crate::particle::ParticleStore,
     pub level_runtime: crate::world::level::LevelRuntime,
     pub block_entity_anim: BlockEntityAnimStore,
@@ -572,6 +574,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            display_entity_store: crate::entity::DisplayEntityStore::new(),
             particle_store: {
                 let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
                 crate::particle::ParticleStore::new(
@@ -4226,6 +4229,7 @@ pub fn update_game(
                     &input,
                     &container.slots,
                     &container.title,
+                    &container.title_spans,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
@@ -4243,6 +4247,7 @@ pub fn update_game(
                     &container.slots,
                     &container.data,
                     &container.title,
+                    &container.title_spans,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
@@ -4260,6 +4265,7 @@ pub fn update_game(
                     rows,
                     &container.slots,
                     &container.title,
+                    &container.title_spans,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
@@ -4276,6 +4282,7 @@ pub fn update_game(
                     container.screen.click_kind(),
                     &container.slots,
                     &container.title,
+                    &container.title_spans,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
@@ -4294,6 +4301,7 @@ pub fn update_game(
                     crate::version::session_protocol() >= 777,
                     container.click_kind(&game.recipe_book),
                     &container.title,
+                    &container.title_spans,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
@@ -4311,6 +4319,7 @@ pub fn update_game(
                     &container.data,
                     crate::player::is_spectator(game.player.game_mode),
                     &container.title,
+                    &container.title_spans,
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
@@ -4326,6 +4335,7 @@ pub fn update_game(
                     &container.slots,
                     &container.data,
                     &container.title,
+                    &container.title_spans,
                     container.anvil.as_ref().expect("anvil screen has state"),
                     game.player.experience_level,
                     crate::player::is_creative(game.player.game_mode),
@@ -4345,6 +4355,7 @@ pub fn update_game(
                         &container.slots,
                         &container.data,
                         &container.title,
+                        &container.title_spans,
                         container
                             .enchant
                             .as_ref()
@@ -4741,6 +4752,42 @@ pub fn update_game(
 
     let swing_progress = HANDS.map(|hand| game.interaction.swing_progress(hand, partial_tick));
     let use_anim = HANDS.map(|hand| game.interaction.use_animation(hand, partial_tick));
+    let equip_progress = HANDS.map(|hand| game.interaction.equip_progress(hand, partial_tick));
+    let held_items = if benchmark_running {
+        [None, None]
+    } else {
+        let held = |stack: Option<&azalea_inventory::ItemStackData>| {
+            stack.and_then(|data| {
+                let name = crate::player::inventory::item_resource_name(data.kind);
+                (name != "air").then(|| (name, data.clone()))
+            })
+        };
+        [
+            held(game.interaction.equipped_item(InteractionHand::MainHand)),
+            held(game.interaction.equipped_item(InteractionHand::OffHand)),
+        ]
+    };
+    let main_hand_right = core.menu.main_hand_right();
+    let hand_pose = |hand_idx: usize| -> crate::renderer::entity_model::HumanoidArmPose {
+        match use_anim[hand_idx] {
+            Some(UseAnim::Eat(_)) => crate::renderer::entity_model::HumanoidArmPose::Eat,
+            Some(UseAnim::Block) => crate::renderer::entity_model::HumanoidArmPose::Block,
+            Some(UseAnim::Bow) => crate::renderer::entity_model::HumanoidArmPose::BowAndArrow,
+            None => {
+                if held_items[hand_idx].is_some() {
+                    crate::renderer::entity_model::HumanoidArmPose::Item
+                } else {
+                    crate::renderer::entity_model::HumanoidArmPose::Empty
+                }
+            }
+        }
+    };
+    use crate::renderer::pipelines::held_item::UseAnim;
+    let (right_pose, left_pose) = if main_hand_right {
+        (hand_pose(0), hand_pose(1))
+    } else {
+        (hand_pose(1), hand_pose(0))
+    };
     let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         (pos, stage, state)
@@ -4911,7 +4958,10 @@ pub fn update_game(
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
+                    right_arm_pose: crate::renderer::entity_model::HumanoidArmPose::Empty,
+                    left_arm_pose: crate::renderer::entity_model::HumanoidArmPose::Empty,
                     skip_cull: false,
+                    is_local_player: false,
                     shadow: ShadowCaster {
                         position: *interp_pos,
                         offset: extras.render_offset,
@@ -4983,7 +5033,12 @@ pub fn update_game(
             armor: armor_render_infos(game.player.inventory.armor_slots()),
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
+            age_in_ticks: game.tick_count as f32 + partial_tick,
+            attack_time: swing_progress[0].max(swing_progress[1]),
+            right_arm_pose: right_pose,
+            left_arm_pose: left_pose,
             skip_cull: true,
+            is_local_player: true,
             // Players drop their render offset before the shadow.
             shadow: ShadowCaster {
                 position: *interp_pos,
@@ -5234,7 +5289,15 @@ pub fn update_game(
             // `getDisplayName`: a player's account name, or a mob's custom
             // name when it shows it or is under the crosshair.
             let spans = match entity.player_uuid {
-                Some(_) => game.scoreboard.line(&name, None),
+                Some(player_uuid) => match game.tab_list.players.get(&player_uuid) {
+                    Some(_) => game.scoreboard.line(&name, None),
+                    None => match &entity.custom_name_spans {
+                        Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
+                            game.scoreboard.line(&name, Some(custom))
+                        }
+                        _ => continue,
+                    },
+                },
                 None => match &entity.custom_name_spans {
                     Some(custom) if entity.custom_name_visible || target == Some(entity_id) => {
                         game.scoreboard.line(&name, Some(custom))
@@ -5246,7 +5309,10 @@ pub fn update_game(
             if dist_sq >= 64.0 * 64.0 || entity.is_crouching && dist_sq >= 32.0 * 32.0 {
                 continue;
             }
-            let visible = !entity.is_invisible
+            let is_stand_hologram =
+                entity.entity_type == EntityKind::ArmorStand && entity.custom_name_visible;
+            let visible = is_stand_hologram
+                || !entity.is_invisible
                 || spectating
                 || game.scoreboard.sees_friendly_invisible(&viewer, &name);
             let shown = game
@@ -5274,6 +5340,55 @@ pub fn update_game(
                     entity.is_on_fire,
                     entity.dark_ticks,
                 ),
+            });
+        }
+        list
+    };
+    let text_display_renders = if benchmark_running {
+        Vec::new()
+    } else {
+        let camera = gfx.renderer.camera_render_position();
+        let mut list = Vec::new();
+        for (&entity_id, display) in &game.display_entity_store.text_displays {
+            let Some(spans) = &display.spans else { continue };
+            if spans.is_empty() {
+                continue;
+            }
+            let position = display.prev_position.lerp(display.position, partial_tick as f64);
+            let dist_sq = (*position - camera).length_squared();
+            let max_dist = (display.view_range * 64.0) as f64;
+            if dist_sq >= max_dist * max_dist {
+                continue;
+            }
+            let light = if display.brightness != -1 {
+                let block = ((display.brightness >> 4) & 0x0f) as u8;
+                let sky = ((display.brightness >> 20) & 0x0f) as u8;
+                LightLevels::new(sky, block)
+            } else {
+                entity_light(
+                    &world_light,
+                    EntityKind::TextDisplay,
+                    crate::entity::Position::new(position.x, position.y, position.z),
+                    false,
+                    0,
+                )
+            };
+            list.push(crate::renderer::pipelines::text_display::TextDisplayRenderInfo {
+                entity_id,
+                position: *position,
+                y_rot_deg: display.y_rot_deg,
+                x_rot_deg: display.x_rot_deg,
+                spans: spans.clone(),
+                translation: display.translation,
+                scale: display.scale,
+                left_rotation: display.left_rotation,
+                right_rotation: display.right_rotation,
+                billboard: display.billboard,
+                line_width: display.line_width,
+                background_color: display.background_color,
+                text_opacity: display.text_opacity,
+                style_flags: display.style_flags,
+                light,
             });
         }
         list
@@ -5307,18 +5422,7 @@ pub fn update_game(
     let shown_hands = game
         .interaction
         .hands_to_render(main_stack.as_present(), inventory.offhand().as_present());
-    let held_items = if benchmark_running {
-        [None, None]
-    } else {
-        let held = |stack: &azalea_inventory::ItemStack| match stack {
-            azalea_inventory::ItemStack::Present(data) => {
-                let name = crate::player::inventory::item_resource_name(data.kind);
-                (name != "air").then(|| (name, data.clone()))
-            }
-            _ => None,
-        };
-        [held(main_stack), held(inventory.offhand())]
-    };
+
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
@@ -5357,6 +5461,7 @@ pub fn update_game(
         hide_cursor,
         elements,
         swing_progress,
+        equip_progress,
         use_anim,
         held_items,
         core.menu.main_hand_right(),
@@ -5384,6 +5489,7 @@ pub fn update_game(
         },
         &particle_quads,
         &nameplate_renders,
+        &text_display_renders,
         &sign_renders,
         &weather_columns,
         if no_ambience {
@@ -5880,11 +5986,16 @@ fn build_item_render_infos(
     for item in entity_store.visible_items(camera_pos, 64.0) {
         let age_f = item.age as f32 + partial_tick;
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
-        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
+        let resolved_name = item
+            .stack
+            .as_ref()
+            .map(|s| renderer.render_assets().stack_model_key(&item.item_name, s))
+            .unwrap_or_else(|| item.item_name.clone());
+        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &resolved_name);
         emit_item_copies(
             &mut infos,
             renderer.render_assets(),
-            &item.item_name,
+            &resolved_name,
             item.item_id,
             item.damage,
             item.count,
@@ -5904,11 +6015,16 @@ fn build_item_render_infos(
     // pickup.
     for pickup in entity_store.active_pickups(partial_tick) {
         let age_f = pickup.age as f32 + partial_tick;
-        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
+        let resolved_name = pickup
+            .stack
+            .as_ref()
+            .map(|s| renderer.render_assets().stack_model_key(&pickup.item_name, s))
+            .unwrap_or_else(|| pickup.item_name.clone());
+        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &resolved_name);
         emit_item_copies(
             &mut infos,
             renderer.render_assets(),
-            &pickup.item_name,
+            &resolved_name,
             pickup.item_id,
             pickup.damage,
             pickup.count,

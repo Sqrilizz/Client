@@ -1,8 +1,3 @@
-//! Touch controls for gameplay, Bedrock-style: a move stick on the left,
-//! dragging elsewhere to look, a tap to use, a still hold to destroy, and
-//! buttons for jump, inventory and pause. Outside gameplay a touch is the
-//! mouse pointer, so every screen works unchanged.
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -11,21 +6,14 @@ use winit::event::TouchPhase;
 
 use super::action::Action;
 
-/// A press lifted within this, having stayed still, is a use.
 const TAP_TIME: Duration = Duration::from_millis(250);
-/// A press held still this long starts destroying.
 const HOLD_TIME: Duration = Duration::from_millis(300);
-/// How far a press may drift, in GUI units, and still count as still.
 const STILL_SLOP: f32 = 4.0;
-/// The stick's travel, in GUI units.
 pub const STICK_RADIUS: f32 = 30.0;
-/// Mouse counts per GUI unit dragged.
 const LOOK_SCALE: f32 = 2.5;
-/// The share of the screen width, from the left, where a press is the stick.
 const STICK_ZONE: f32 = 0.4;
 pub const BUTTON_RADIUS: f32 = 14.0;
 
-/// Where the controls sit on a `width` x `height` screen at GUI scale `gs`.
 #[derive(Clone, Copy)]
 pub struct TouchLayout {
     pub width: f32,
@@ -39,10 +27,29 @@ pub enum TouchButton {
     Chat,
     Inventory,
     Pause,
+    Keyboard,
+    Debug,
+    ThirdPerson,
+    PlayerList,
+    Sneak,
+    Primary,
+    Secondary,
 }
 
 impl TouchButton {
-    pub const ALL: [Self; 4] = [Self::Jump, Self::Chat, Self::Inventory, Self::Pause];
+    pub const ALL: [Self; 11] = [
+        Self::Jump,
+        Self::Chat,
+        Self::Inventory,
+        Self::Pause,
+        Self::Keyboard,
+        Self::Debug,
+        Self::ThirdPerson,
+        Self::PlayerList,
+        Self::Sneak,
+        Self::Primary,
+        Self::Secondary,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -50,33 +57,51 @@ impl TouchButton {
             Self::Chat => "Chat",
             Self::Inventory => "Inv",
             Self::Pause => "| |",
+            Self::Keyboard => "Kbd",
+            Self::Debug => "F3",
+            Self::ThirdPerson => "F5",
+            Self::PlayerList => "Tab",
+            Self::Sneak => "Snk",
+            Self::Primary => "PRI",
+            Self::Secondary => "SEC",
         }
     }
 
-    /// The action a tap presses; Jump is held instead.
     fn tapped_action(self) -> Option<Action> {
         match self {
             Self::Jump => None,
             Self::Chat => Some(Action::OpenChat),
             Self::Inventory => Some(Action::ToggleInventory),
             Self::Pause => Some(Action::OpenMenu),
+            Self::Keyboard => None,
+            Self::Debug => Some(Action::ToggleOverlay),
+            Self::ThirdPerson => Some(Action::ChangePerspective),
+            Self::PlayerList => None,
+            Self::Sneak => None,
+            Self::Primary => None,
+            Self::Secondary => None,
         }
     }
 }
 
 impl TouchLayout {
-    /// A button's centre; all share [`BUTTON_RADIUS`].
     pub fn button_centre(&self, button: TouchButton) -> Vec2 {
         let inset = 2.0 * BUTTON_RADIUS * self.gs;
         match button {
             TouchButton::Jump => Vec2::new(self.width - inset, self.height - 1.5 * inset),
-            TouchButton::Chat => Vec2::new(self.width - 4.0 * inset, inset),
-            TouchButton::Inventory => Vec2::new(self.width - 2.5 * inset, inset),
+            TouchButton::Secondary => Vec2::new(self.width - inset, self.height - 3.0 * inset),
+            TouchButton::Primary => Vec2::new(self.width - 2.5 * inset, self.height - 2.25 * inset),
             TouchButton::Pause => Vec2::new(self.width - inset, inset),
+            TouchButton::Inventory => Vec2::new(self.width - 2.5 * inset, inset),
+            TouchButton::Chat => Vec2::new(self.width - 4.0 * inset, inset),
+            TouchButton::Keyboard => Vec2::new(self.width - 5.5 * inset, inset),
+            TouchButton::ThirdPerson => Vec2::new(self.width - 7.0 * inset, inset),
+            TouchButton::Debug => Vec2::new(inset, inset),
+            TouchButton::PlayerList => Vec2::new(2.5 * inset, inset),
+            TouchButton::Sneak => Vec2::new(self.width - 4.0 * inset, self.height - 1.5 * inset),
         }
     }
 
-    /// Where the stick rests until a press places it.
     pub fn stick_home(&self) -> Vec2 {
         let inset = 1.6 * STICK_RADIUS * self.gs;
         Vec2::new(inset, self.height - inset)
@@ -93,29 +118,25 @@ impl TouchLayout {
     }
 }
 
-/// What a touch did, for `InputState` to apply as mouse and key input.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TouchOutput {
-    /// Mouse counts to turn by.
     Look(Vec2),
     DestroyStart,
     DestroyEnd,
-    /// A destroy that outlived gameplay: stop it without a release.
     DestroyCancel,
     Use,
-    /// A tap of an action's key.
     Tap(Action),
     Hotbar(u8),
     PointerMove(Vec2),
     PointerDown,
     PointerUp,
+    ToggleKeyboard,
 }
 
 enum Role {
     Stick {
         origin: Vec2,
         current: Vec2,
-        /// [`STICK_RADIUS`] in pixels.
         radius: f32,
     },
     Look {
@@ -126,16 +147,18 @@ enum Role {
         destroying: bool,
     },
     Jump,
+    Primary,
+    Secondary,
+    PlayerList,
     Pointer,
-    /// A tap already handled on press; ignored until it lifts.
     Spent,
 }
 
 #[derive(Default)]
 pub struct TouchControls {
     touches: HashMap<u64, Role>,
-    /// Any touch has arrived, so the overlay shows; only phones feed them.
     seen: bool,
+    sneak_locked: bool,
 }
 
 impl TouchControls {
@@ -143,9 +166,10 @@ impl TouchControls {
         self.seen
     }
 
-    /// Feeds one touch event. `gameplay` is whether the world has the input
-    /// (no screen, chat or pause menu open); a touch keeps the role it
-    /// started with until it lifts.
+    pub fn is_sneak_locked(&self) -> bool {
+        self.sneak_locked
+    }
+
     pub fn on_touch(
         &mut self,
         id: u64,
@@ -178,9 +202,20 @@ impl TouchControls {
                 vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
             )
         } else if let Some(button) = layout.button_at(p) {
-            match button.tapped_action() {
-                Some(action) => (Role::Spent, vec![TouchOutput::Tap(action)]),
-                None => (Role::Jump, Vec::new()),
+            match button {
+                TouchButton::Jump => (Role::Jump, Vec::new()),
+                TouchButton::Primary => (Role::Primary, vec![TouchOutput::DestroyStart]),
+                TouchButton::Secondary => (Role::Secondary, vec![TouchOutput::Use]),
+                TouchButton::PlayerList => (Role::PlayerList, Vec::new()),
+                TouchButton::Sneak => {
+                    self.sneak_locked = !self.sneak_locked;
+                    (Role::Spent, Vec::new())
+                }
+                TouchButton::Keyboard => (Role::Spent, vec![TouchOutput::ToggleKeyboard]),
+                other => match other.tapped_action() {
+                    Some(action) => (Role::Spent, vec![TouchOutput::Tap(action)]),
+                    None => (Role::Spent, Vec::new()),
+                },
             }
         } else if let Some(slot) = layout.hotbar_slot_at(p) {
             (Role::Spent, vec![TouchOutput::Hotbar(slot)])
@@ -230,7 +265,6 @@ impl TouchControls {
         }
     }
 
-    /// A look touch lifted after a screen opened stays out of that screen.
     fn end(&mut self, id: u64, now: Instant, lifted: bool, gameplay: bool) -> Vec<TouchOutput> {
         match self.touches.remove(&id) {
             Some(Role::Look {
@@ -245,13 +279,16 @@ impl TouchControls {
             {
                 vec![TouchOutput::Use]
             }
+            Some(Role::Primary) => vec![if gameplay {
+                TouchOutput::DestroyEnd
+            } else {
+                TouchOutput::DestroyCancel
+            }],
             Some(Role::Pointer) => vec![TouchOutput::PointerUp],
             _ => Vec::new(),
         }
     }
 
-    /// Once a frame: a look press held still long enough starts destroying,
-    /// while the world has the input.
     pub fn tick(&mut self, now: Instant, gameplay: bool) -> Vec<TouchOutput> {
         let mut out = Vec::new();
         if !gameplay {
@@ -260,10 +297,11 @@ impl TouchControls {
         for role in self.touches.values_mut() {
             if let Role::Look {
                 since,
-                still: true,
+                still,
                 destroying,
                 ..
             } = role
+                && *still
                 && !*destroying
                 && now.duration_since(*since) >= HOLD_TIME
             {
@@ -274,23 +312,6 @@ impl TouchControls {
         out
     }
 
-    /// The stick's deflection, unit length at most, `+y` up like a gamepad
-    /// stick.
-    pub fn stick(&self) -> Option<Vec2> {
-        self.touches.values().find_map(|role| match role {
-            Role::Stick {
-                origin,
-                current,
-                radius,
-            } => {
-                let v = (*current - *origin) / *radius;
-                Some(Vec2::new(v.x, -v.y).clamp_length_max(1.0))
-            }
-            _ => None,
-        })
-    }
-
-    /// Where a held stick was placed, for drawing.
     pub fn stick_origin(&self) -> Option<Vec2> {
         self.touches.values().find_map(|role| match role {
             Role::Stick { origin, .. } => Some(*origin),
@@ -298,8 +319,38 @@ impl TouchControls {
         })
     }
 
+    pub fn stick(&self) -> Option<Vec2> {
+        self.touches.values().find_map(|role| match role {
+            Role::Stick {
+                origin,
+                current,
+                radius,
+            } => {
+                let d = *current - *origin;
+                if d == Vec2::ZERO {
+                    Some(Vec2::ZERO)
+                } else {
+                    let len = d.length();
+                    let clamped = d / len * len.min(*radius) / *radius;
+                    Some(Vec2::new(clamped.x, -clamped.y))
+                }
+            }
+            _ => None,
+        })
+    }
+
     pub fn jump_held(&self) -> bool {
         self.touches.values().any(|role| matches!(role, Role::Jump))
+    }
+
+    pub fn player_list_held(&self) -> bool {
+        self.touches
+            .values()
+            .any(|role| matches!(role, Role::PlayerList))
+    }
+
+    pub fn sneak_held(&self) -> bool {
+        self.sneak_locked
     }
 }
 
@@ -313,13 +364,12 @@ mod tests {
     use super::{Action, TouchButton, TouchControls, TouchLayout, TouchOutput};
 
     const LAYOUT: TouchLayout = TouchLayout {
-        width: 1600.0,
-        height: 900.0,
+        width: 800.0,
+        height: 600.0,
         gs: 2.0,
     };
-    /// Right of the stick zone, above the hotbar, away from the buttons.
-    const LOOK: Vec2 = Vec2::new(1000.0, 400.0);
-    const STICK: Vec2 = Vec2::new(200.0, 600.0);
+    const STICK: Vec2 = Vec2::new(100.0, 500.0);
+    const LOOK: Vec2 = Vec2::new(500.0, 300.0);
 
     fn ms(start: Instant, ms: u64) -> Instant {
         start + Duration::from_millis(ms)
@@ -462,7 +512,32 @@ mod tests {
         touch(&mut c, 2, TouchPhase::Ended, Vec2::ZERO, t);
         assert!(!c.jump_held());
 
-        // The hotbar's first slot starts 1 unit in from its left edge.
+        let kbd = LAYOUT.button_centre(TouchButton::Keyboard);
+        assert_eq!(
+            touch(&mut c, 5, TouchPhase::Started, kbd, t),
+            [TouchOutput::ToggleKeyboard]
+        );
+        let pri = LAYOUT.button_centre(TouchButton::Primary);
+        assert_eq!(
+            touch(&mut c, 6, TouchPhase::Started, pri, t),
+            [TouchOutput::DestroyStart]
+        );
+        assert_eq!(
+            touch(&mut c, 6, TouchPhase::Ended, pri, t),
+            [TouchOutput::DestroyEnd]
+        );
+        let sec = LAYOUT.button_centre(TouchButton::Secondary);
+        assert_eq!(
+            touch(&mut c, 7, TouchPhase::Started, sec, t),
+            [TouchOutput::Use]
+        );
+        let snk = LAYOUT.button_centre(TouchButton::Sneak);
+        assert!(!c.sneak_held());
+        touch(&mut c, 8, TouchPhase::Started, snk, t);
+        assert!(c.sneak_held());
+        touch(&mut c, 9, TouchPhase::Started, snk, t);
+        assert!(!c.sneak_held());
+
         let first_slot = Vec2::new(LAYOUT.width / 2.0 - 91.0 * 2.0 + 10.0, LAYOUT.height - 10.0);
         assert_eq!(
             touch(&mut c, 3, TouchPhase::Started, first_slot, t),

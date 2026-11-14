@@ -4201,16 +4201,16 @@ pub fn bake_witch_model() -> BakedEntityModel {
 /// Vanilla `HumanoidModel.ArmPose`, for the poses Pomme draws.
 // TODO: the two-handed and use poses (bow, crossbow, trident, spyglass,
 // horn, brush, spear).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HumanoidArmPose {
     Empty,
     Item,
     Block,
+    BowAndArrow,
+    Eat,
 }
 
 impl HumanoidArmPose {
-    /// Vanilla `AvatarRenderer.getArmPose` for a hand holding an item or
-    /// not, `blocking` while it's used with the `BLOCK` animation.
     pub fn for_hand(holding: bool, blocking: bool) -> Self {
         match (holding, blocking) {
             (false, _) => Self::Empty,
@@ -4219,9 +4219,7 @@ impl HumanoidArmPose {
         }
     }
 
-    /// Vanilla `poseRightArm`/`poseLeftArm`: `arm` is the arm's
-    /// `(xRot, yRot, zRot)` so far, `head` the head's `(xRot, yRot)`.
-    pub fn pose(self, arm: Vec3, right_arm: bool, head: Vec2) -> Vec3 {
+    pub fn pose(self, arm: Vec3, right_arm: bool, head: Vec2, age_in_ticks: f32) -> Vec3 {
         match self {
             Self::Empty => arm,
             Self::Item => Vec3::new(arm.x * 0.5 - 0.31415927, 0.0, arm.z),
@@ -4231,6 +4229,19 @@ impl HumanoidArmPose {
                     + head.y.clamp(-FRAC_PI_6, FRAC_PI_6),
                 arm.z,
             ),
+            Self::BowAndArrow => Vec3::new(
+                -std::f32::consts::FRAC_PI_2 + head.x,
+                if right_arm { -0.1 } else { 0.1 } + head.y,
+                arm.z,
+            ),
+            Self::Eat => {
+                let chew = (age_in_ticks * 1.2).sin() * 0.05;
+                Vec3::new(
+                    -1.35 + head.x * 0.5 + chew,
+                    if right_arm { -0.5 } else { 0.5 } + head.y * 0.5,
+                    if right_arm { -0.2 } else { 0.2 },
+                )
+            }
         }
     }
 }
@@ -4243,31 +4254,69 @@ pub fn compute_humanoid_anim(
     walk_speed: f32,
     is_crouching: bool,
     is_passenger: bool,
+    attack_time: f32,
+    right_arm_pose: HumanoidArmPose,
+    left_arm_pose: HumanoidArmPose,
+    age_in_ticks: f32,
 ) -> PartAnim {
     let mut anim = PartAnim::default();
     let crouch_arm_rot = if is_crouching { 0.4 } else { 0.0 };
-    // `HumanoidModel.setupAnim`: a passenger's arms reach forward and its
-    // legs sit out to the sides.
     let riding_arm_rot = if is_passenger { -0.628_318_55 } else { 0.0 };
+
+    let mut head_rot = head_rotation(head_x_rot_deg, local_head_y_rot_deg);
+    if right_arm_pose == HumanoidArmPose::Eat || left_arm_pose == HumanoidArmPose::Eat {
+        head_rot.x += (age_in_ticks * 1.2).cos() * 0.03;
+    }
+
+    let head_angles = Vec2::new(head_x_rot_deg.to_radians(), local_head_y_rot_deg.to_radians());
+
+    let mut right_arm = Vec3::new(
+        (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 2.0 * walk_speed * 0.5
+            + crouch_arm_rot
+            + riding_arm_rot,
+        0.0,
+        0.0,
+    );
+    let mut left_arm = Vec3::new(
+        (walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5
+            + crouch_arm_rot
+            + riding_arm_rot,
+        0.0,
+        0.0,
+    );
+    let mut body = if is_crouching { Vec3::new(0.5, 0.0, 0.0) } else { Vec3::ZERO };
+
+    right_arm = right_arm_pose.pose(right_arm, true, head_angles, age_in_ticks);
+    left_arm = left_arm_pose.pose(left_arm, false, head_angles, age_in_ticks);
+
+    let mut right_arm_extra_trans = Vec3::ZERO;
+    let mut left_arm_extra_trans = Vec3::ZERO;
+
+    if attack_time > 0.0 && attack_time < 1.0 {
+        let body_y = (attack_time.sqrt() * (std::f32::consts::PI * 2.0)).sin() * 0.2;
+        body.y += body_y;
+        right_arm.y += body_y;
+        left_arm.y += body_y;
+        right_arm_extra_trans.z += body_y.sin() * 5.0;
+        right_arm_extra_trans.x -= body_y.cos() * 5.0 - 5.0;
+        left_arm_extra_trans.z -= body_y.sin() * 5.0;
+        left_arm_extra_trans.x += body_y.cos() * 5.0 - 5.0;
+
+        let mut f = 1.0 - attack_time;
+        f = 1.0 - f * f * f * f;
+        let f1 = (f * std::f32::consts::PI).sin();
+        let f2 = (attack_time * std::f32::consts::PI).sin() * -(head_angles.x - 0.7) * 0.75;
+        right_arm.x -= f1 * 1.2 + f2;
+        right_arm.y += body_y * 2.0;
+        right_arm.z += (attack_time * std::f32::consts::PI).sin() * -0.4;
+    }
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
-            "head" => head_rotation(head_x_rot_deg, local_head_y_rot_deg),
-            "body" if is_crouching => Vec3::new(0.5, 0.0, 0.0),
-            "right_arm" => Vec3::new(
-                (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 2.0 * walk_speed * 0.5
-                    + crouch_arm_rot
-                    + riding_arm_rot,
-                0.0,
-                0.0,
-            ),
-            "left_arm" => Vec3::new(
-                (walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5
-                    + crouch_arm_rot
-                    + riding_arm_rot,
-                0.0,
-                0.0,
-            ),
+            "head" => head_rot,
+            "body" => body,
+            "right_arm" => right_arm,
+            "left_arm" => left_arm,
             "right_leg" if is_passenger => Vec3::new(-1.413_716_7, 0.314_159_27, 0.078_539_82),
             "left_leg" if is_passenger => Vec3::new(-1.413_716_7, -0.314_159_27, -0.078_539_82),
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
@@ -4278,16 +4327,23 @@ pub fn compute_humanoid_anim(
             ),
             _ => continue,
         };
-        if is_crouching {
-            let translation = match part.name.as_str() {
+        let mut translation = if is_crouching {
+            match part.name.as_str() {
                 "head" => Vec3::new(0.0, 4.2, 0.0),
                 "body" | "right_arm" | "left_arm" => Vec3::new(0.0, 3.2, 0.0),
                 "right_leg" | "left_leg" => Vec3::new(0.0, 0.0, 4.0),
                 _ => Vec3::ZERO,
-            };
-            if translation != Vec3::ZERO {
-                anim.translation.push((i, translation));
             }
+        } else {
+            Vec3::ZERO
+        };
+        if part.name == "right_arm" {
+            translation += right_arm_extra_trans;
+        } else if part.name == "left_arm" {
+            translation += left_arm_extra_trans;
+        }
+        if translation != Vec3::ZERO {
+            anim.translation.push((i, translation));
         }
         anim.rotation.push((i, rot));
     }

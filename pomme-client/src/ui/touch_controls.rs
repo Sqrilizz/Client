@@ -1,6 +1,3 @@
-//! Draws the touch controls (`app::input::touch`) over the HUD: the move
-//! stick, resting bottom-left until a press places it, and the buttons.
-
 use glam::Vec2;
 
 use crate::app::input::touch::{
@@ -9,8 +6,9 @@ use crate::app::input::touch::{
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::ui::common::{FONT_SIZE, WHITE};
 
-const BASE: [f32; 4] = [0.0, 0.0, 0.0, 0.35];
-const KNOB: [f32; 4] = [1.0, 1.0, 1.0, 0.45];
+const BASE: [f32; 4] = [0.0, 0.0, 0.0, 0.40];
+const BASE_ACTIVE: [f32; 4] = [0.2, 0.4, 0.7, 0.65];
+const KNOB: [f32; 4] = [1.0, 1.0, 1.0, 0.50];
 
 pub fn build_touch_controls(
     elements: &mut Vec<MenuElement>,
@@ -26,7 +24,12 @@ pub fn build_touch_controls(
 
     for button in TouchButton::ALL {
         let centre = layout.button_centre(button);
-        push_circle(elements, centre, BUTTON_RADIUS * gs, BASE);
+        let color = if button == TouchButton::Sneak && touch.is_sneak_locked() {
+            BASE_ACTIVE
+        } else {
+            BASE
+        };
+        push_circle(elements, centre, BUTTON_RADIUS * gs, color);
         elements.push(MenuElement::Text {
             x: centre.x,
             y: centre.y - FONT_SIZE * gs / 2.0,

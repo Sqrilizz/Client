@@ -1,14 +1,8 @@
-//! `ClientboundSetEntityDataPacket`'s value list: each entry is an index, a
-//! serializer id and that serializer's value, with no length prefix, so an
-//! unknown serializer ends the packet (`SynchedEntityData.DataValue.read`).
-
 use crate::codec::{DecodeResult, MAX_STRING_LENGTH, Reader};
 use crate::item::{ItemCodec, ItemStack, PARTICLE, RESOLVABLE_PROFILE, Shape};
 
-/// `ClientboundSetEntityDataPacket.EOF_MARKER`.
 const EOF_MARKER: u8 = 0xFF;
 
-/// The entity variants the client resolves to textures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variant {
     Cat,
@@ -17,8 +11,6 @@ pub enum Variant {
     Chicken,
 }
 
-/// How a serializer's value is read: decoded for the ones the client uses,
-/// otherwise validated and skipped by shape.
 #[derive(Debug)]
 pub enum Serializer {
     Byte,
@@ -26,19 +18,19 @@ pub enum Serializer {
     Long,
     Float,
     Bool,
+    Component,
     OptionalComponent,
     ItemStack,
     OptionalBlockPos,
     VillagerData,
     Pose,
     Variant(Variant),
+    Vector3,
+    Quaternion,
     Skip(Shape),
 }
 
 impl Serializer {
-    /// Skips a native value without decoding it. Items and particles return
-    /// false because their callers must translate their version-specific
-    /// payloads.
     pub fn skip_native_value(&'static self, r: &mut Reader) -> DecodeResult<bool> {
         let shape: &'static Shape = match self {
             Self::Byte | Self::Bool => {
@@ -51,10 +43,13 @@ impl Serializer {
             }
             Self::Int | Self::Pose | Self::Variant(_) => &Shape::VarInt,
             Self::Float => &Shape::Float,
+            Self::Component => &TEXT,
             Self::OptionalComponent => &Shape::Optional(&TEXT),
             Self::OptionalBlockPos => &Shape::Optional(&Shape::Long),
             Self::VillagerData => &Shape::Struct(&[Shape::VarInt, Shape::VarInt, Shape::VarInt]),
             Self::ItemStack => return Ok(false),
+            Self::Vector3 => &Shape::Struct(&[Float, Float, Float]),
+            Self::Quaternion => &Shape::Struct(&[Float, Float, Float, Float]),
             Self::Skip(Shape::Ref(shape) | Shape::List(_, shape))
                 if std::ptr::eq(*shape, &PARTICLE) =>
             {
@@ -67,7 +62,6 @@ impl Serializer {
     }
 }
 
-/// One decoded entry's value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Byte(u8),
@@ -75,7 +69,7 @@ pub enum Value {
     Long(i64),
     Float(f32),
     Bool(bool),
-    /// A text component's NBT bytes.
+    Component(Box<[u8]>),
     OptionalComponent(Option<Box<[u8]>>),
     Item(Option<ItemStack>),
     OptionalBlockPos(Option<(i32, i32, i32)>),
@@ -84,11 +78,10 @@ pub enum Value {
         profession: u32,
         level: u32,
     },
-    /// `Pose.id`.
     Pose(u32),
-    /// A registry id.
     Variant(Variant, u32),
-    /// A value the client doesn't read.
+    Vector3([f32; 3]),
+    Quaternion([f32; 4]),
     Other,
 }
 
@@ -101,70 +94,46 @@ pub struct DataValue {
 use Serializer as S;
 use Shape::*;
 
-/// `ComponentSerialization.TRUSTED_STREAM_CODEC`: NBT.
 const TEXT: Shape = Nbt;
-/// A `holderRegistry` id.
 const REGISTRY_ID: Shape = VarInt;
-/// An `idMapper` enum.
 const ENUM: Shape = VarInt;
 
-/// The 26.2 serializers by id, in `EntityDataSerializers`' static-block
-/// registration order (`EntityDataSerializers.java:166-210`), which differs
-/// from the field order; `$extra` are a later version's appended ones.
 macro_rules! serializers_26_2 {
     ($($extra:expr),*) => { &[
     S::Byte,
     S::Int,
     S::Long,
     S::Float,
-    // STRING_UTF8
     S::Skip(Utf(MAX_STRING_LENGTH)),
-    S::Skip(TEXT),
+    S::Component,
     S::OptionalComponent,
     S::ItemStack,
     S::Bool,
-    // Rotations.java:18
     S::Skip(Struct(&[Float, Float, Float])),
-    // BlockPos
     S::Skip(Long),
     S::OptionalBlockPos,
-    // Direction
     S::Skip(ENUM),
-    // OPTIONAL_LIVING_ENTITY_REFERENCE: EntityReference.java:34
     S::Skip(Optional(&Uuid)),
-    // BLOCK_STATE
     S::Skip(VarInt),
-    // OPTIONAL_BLOCK_STATE: 0 for none, not a bool.
     S::Skip(VarInt),
     S::Skip(Ref(&PARTICLE)),
     S::Skip(List(usize::MAX, &PARTICLE)),
     S::VillagerData,
-    // OPTIONAL_UNSIGNED_INT: 0 for none, else the value + 1.
     S::Skip(VarInt),
     S::Pose,
     S::Variant(Variant::Cat),
-    // CAT_SOUND_VARIANT
     S::Skip(REGISTRY_ID),
     S::Variant(Variant::Cow),
-    // COW_SOUND_VARIANT
     S::Skip(REGISTRY_ID),
     S::Variant(Variant::Wolf),
-    // WOLF_SOUND_VARIANT
     S::Skip(REGISTRY_ID),
-    // FROG_VARIANT
     S::Skip(REGISTRY_ID),
-    // PIG_VARIANT
     S::Skip(REGISTRY_ID),
-    // PIG_SOUND_VARIANT
     S::Skip(REGISTRY_ID),
     S::Variant(Variant::Chicken),
-    // CHICKEN_SOUND_VARIANT
     S::Skip(REGISTRY_ID),
-    // ZOMBIE_NAUTILUS_VARIANT
     S::Skip(REGISTRY_ID),
-    // OPTIONAL_GLOBAL_POS: GlobalPos.java:29, a dimension then a BlockPos.
     S::Skip(Optional(&Struct(&[Utf(MAX_STRING_LENGTH), Long]))),
-    // PAINTING_VARIANT: PaintingVariant.java:30-32, a direct-capable holder.
     S::Skip(Holder(&Struct(&[
         VarInt,
         VarInt,
@@ -172,31 +141,22 @@ macro_rules! serializers_26_2 {
         Optional(&TEXT),
         Optional(&TEXT),
     ]))),
-    // SNIFFER_STATE: an idMapper VarInt, read like INT.
-    S::Int,
-    // ARMADILLO_STATE: an idMapper VarInt, read like INT.
-    S::Int,
-    // COPPER_GOLEM_STATE and WEATHERING_COPPER_STATE: idMapper VarInts.
     S::Int,
     S::Int,
-    // VECTOR3: ByteBufCodecs.VECTOR3F
-    S::Skip(Struct(&[Float, Float, Float])),
-    // QUATERNION: ByteBufCodecs.QUATERNIONF
-    S::Skip(Struct(&[Float, Float, Float, Float])),
+    S::Int,
+    S::Int,
+    S::Vector3,
+    S::Quaternion,
     S::Skip(Ref(&RESOLVABLE_PROFILE)),
-    // HUMANOID_ARM
     S::Skip(ENUM),
     $($extra),*
 ] };
 }
 
 pub static SERIALIZERS_26_2: &[Serializer] = serializers_26_2!();
-
-/// 26.3 appended `DYE_COLOR` (`DyeColor.STREAM_CODEC`, an `idMapper` enum).
 pub static SERIALIZERS_26_3: &[Serializer] = serializers_26_2!(S::Skip(ENUM));
 
 impl ItemCodec {
-    /// `ClientboundSetEntityDataPacket.unpack`: entries up to the end marker.
     pub fn read_entity_data(&self, r: &mut Reader) -> DecodeResult<Vec<DataValue>> {
         let mut values = Vec::new();
         loop {
@@ -225,6 +185,11 @@ impl ItemCodec {
             S::Long => Value::Long(r.varlong()? as i64),
             S::Float => Value::Float(r.f32()?),
             S::Bool => Value::Bool(r.bool()?),
+            S::Component => {
+                let start = r.pos();
+                self.skip(r, &TEXT)?;
+                Value::Component(r.since(start).into())
+            }
             S::OptionalComponent => Value::OptionalComponent(r.optional(|r| {
                 let start = r.pos();
                 self.skip(r, &TEXT)?;
@@ -239,6 +204,8 @@ impl ItemCodec {
             },
             S::Pose => Value::Pose(r.varint()?),
             S::Variant(variant) => Value::Variant(*variant, r.varint()?),
+            S::Vector3 => Value::Vector3([r.f32()?, r.f32()?, r.f32()?]),
+            S::Quaternion => Value::Quaternion([r.f32()?, r.f32()?, r.f32()?, r.f32()?]),
             S::Skip(shape) => {
                 self.skip(r, shape)?;
                 Value::Other
@@ -254,7 +221,6 @@ mod tests {
     use crate::registries::ClientRegistry;
     use crate::wire::write_varint;
 
-    /// Entity data entries built field by field: (index, serializer, value).
     fn frame(entries: &[(u8, u32, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         for (index, serializer, value) in entries {
@@ -291,6 +257,19 @@ mod tests {
     fn decodes_the_values_the_client_reads() {
         let packed = (5i64 << 38) | ((-3i64 & 0x3ff_ffff) << 12) | (-7i64 & 0xfff);
         let pos = [&[1u8][..], &packed.to_be_bytes()].concat();
+        let v3 = [
+            1.0f32.to_be_bytes(),
+            2.0f32.to_be_bytes(),
+            3.0f32.to_be_bytes(),
+        ]
+        .concat();
+        let q = [
+            0.0f32.to_be_bytes(),
+            0.0f32.to_be_bytes(),
+            0.0f32.to_be_bytes(),
+            1.0f32.to_be_bytes(),
+        ]
+        .concat();
         let bytes = frame(&[
             (0, 0, &[0x82]),
             (1, 1, &[0xAC, 0x02]),
@@ -303,6 +282,9 @@ mod tests {
             (8, 18, &[2, 3, 4]),
             (9, 23, &[7]),
             (10, 7, &[0]),
+            (11, 5, &[8, 0, 2, b'h', b'i']),
+            (12, 39, &v3),
+            (13, 40, &q),
         ]);
         assert_eq!(
             values(&bytes),
@@ -322,12 +304,13 @@ mod tests {
                 },
                 Value::Variant(Variant::Cow, 7),
                 Value::Item(None),
+                Value::Component([8, 0, 2, b'h', b'i'].into()),
+                Value::Vector3([1.0, 2.0, 3.0]),
+                Value::Quaternion([0.0, 0.0, 0.0, 1.0]),
             ]
         );
     }
 
-    /// `CopperGolem`'s weathering (16) WEATHERED and state (17) DROPPING_ITEM,
-    /// by vanilla's encoder.
     #[test]
     fn copper_golem_states_match_vanilla_encoder() {
         let payload = crate::vanilla_fixtures::case("set_entity_data/copper_golem");
@@ -350,7 +333,6 @@ mod tests {
         );
     }
 
-    /// `Sniffer.DATA_STATE` (index 18) set to DIGGING by vanilla's encoder.
     #[test]
     fn sniffer_state_matches_vanilla_encoder() {
         let payload = crate::vanilla_fixtures::case("set_entity_data/sniffer_state");
@@ -367,8 +349,6 @@ mod tests {
         );
     }
 
-    /// `Armadillo.ARMADILLO_STATE` (index 18) set to UNROLLING by vanilla's
-    /// encoder.
     #[test]
     fn armadillo_state_matches_vanilla_encoder() {
         let payload = crate::vanilla_fixtures::case("set_entity_data/armadillo_state");
@@ -413,7 +393,6 @@ mod tests {
         particles.push(20);
         let painting = [0, 2, 1, 1, b'a', 1, 8, 0, 1, b't', 0];
         let bytes = frame(&[
-            // OPTIONAL_BLOCK_STATE and OPTIONAL_UNSIGNED_INT: sentinel 0.
             (0, 15, &[0]),
             (1, 19, &[0]),
             (2, 17, &particles),

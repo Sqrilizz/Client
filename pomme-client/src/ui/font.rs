@@ -562,6 +562,31 @@ impl GlyphMap {
     }
 }
 
+#[cfg(test)]
+impl GlyphMap {
+    pub fn empty() -> Self {
+        Self {
+            font_sets: HashMap::new(),
+            missing_glyph: Arc::new(GlyphInfo {
+                atlas_layer: 0,
+                colored: false,
+                atlas_x: 0,
+                atlas_y: 0,
+                pixel_w: 5,
+                pixel_h: 8,
+                draw_w: 5.0,
+                draw_h: 8.0,
+                left: 0.0,
+                top: 0.0,
+                advance: 6.0,
+                bold_offset: 1.0,
+                shadow_offset: 1.0,
+            }),
+            cell_h: 8,
+        }
+    }
+}
+
 struct LoadContext<'a> {
     sources: FontSources<'a>,
     missing: Arc<GlyphInfo>,

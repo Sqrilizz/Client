@@ -202,6 +202,7 @@ enum RenderMode<'a> {
         overlay: Vec<MenuElement>,
         /// The main hand's then the offhand's, as for `held_items`.
         swing_progress: [f32; 2],
+        equip_progress: [f32; 2],
         use_anim: [Option<UseAnim>; 2],
         /// The main hand's then the offhand's item.
         held_items: [Option<pipelines::held_item::HeldItemInfo>; 2],
@@ -224,6 +225,7 @@ enum RenderMode<'a> {
         block_entities: BlockEntityList<'a>,
         particles: &'a [ParticleQuad],
         nameplates: &'a [NameplateRenderInfo],
+        text_displays: &'a [pipelines::text_display::TextDisplayRenderInfo],
         signs: &'a [SignRenderInfo],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
@@ -337,6 +339,7 @@ pub struct Renderer {
         uuid::Uuid,
         std::sync::mpsc::Receiver<Result<SkinData, String>>,
     )>,
+    user_skin_data: Option<SkinData>,
 }
 
 /// The bar's share for the loading thread; `finish`'s steps fill the rest.
@@ -513,6 +516,8 @@ impl Renderer {
             menu_pipeline.mc_font_texture(),
             menu_pipeline.mc_font_color_texture(),
             menu_pipeline.mc_font_sampler(),
+            menu_pipeline.favicon_texture(),
+            menu_pipeline.sprite_texture(),
             &lightmap,
         );
 
@@ -658,6 +663,7 @@ impl Renderer {
             height: swapchain_extent.height,
             last_timings: RenderTimings::default(),
             pending_skin: None,
+            user_skin_data: None,
         })
     }
 
@@ -1631,6 +1637,7 @@ impl Renderer {
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
         swing_progress: [f32; 2],
+        equip_progress: [f32; 2],
         use_anim: [Option<UseAnim>; 2],
         held_items: [Option<(String, azalea_inventory::ItemStackData)>; 2],
         main_hand_right: bool,
@@ -1649,6 +1656,7 @@ impl Renderer {
         block_entities: BlockEntityList<'_>,
         particles: &[ParticleQuad],
         nameplates: &[NameplateRenderInfo],
+        text_displays: &[pipelines::text_display::TextDisplayRenderInfo],
         signs: &[SignRenderInfo],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
@@ -1692,6 +1700,7 @@ impl Renderer {
                 block_render,
                 overlay,
                 swing_progress,
+                equip_progress,
                 use_anim,
                 held_items,
                 main_hand_right,
@@ -1710,6 +1719,7 @@ impl Renderer {
                 block_entities,
                 particles,
                 nameplates,
+                text_displays,
                 signs,
                 weather,
                 cloud_mode,
@@ -1896,6 +1906,8 @@ impl Renderer {
             self.menu_pipeline.mc_font_texture(),
             self.menu_pipeline.mc_font_color_texture(),
             self.menu_pipeline.mc_font_sampler(),
+            self.menu_pipeline.favicon_texture(),
+            self.menu_pipeline.sprite_texture(),
         );
     }
 
@@ -1905,13 +1917,67 @@ impl Renderer {
 
     /// Starts downloading the player's skin; vanilla `SkinManager` fetches
     /// skins asynchronously too, drawing the default one until then.
+    #[allow(dead_code)]
     pub fn load_player_skin(&mut self, uuid: &uuid::Uuid, rt: &tokio::runtime::Runtime) {
+        self.load_user_skin(uuid, None, rt);
+    }
+
+    pub fn load_user_skin(
+        &mut self,
+        uuid: &uuid::Uuid,
+        username: Option<&str>,
+        rt: &tokio::runtime::Runtime,
+    ) {
         let uuid_str = uuid.to_string().replace('-', "");
+        let is_v3 = uuid.get_version_num() == 3;
+        let name = username.map(|s| s.to_string());
         let (tx, rx) = std::sync::mpsc::channel();
+        let uuid_val = *uuid;
         rt.spawn(async move {
-            let _ = tx.send(fetch_skin_texture(&uuid_str).await);
+            let res = if is_v3 {
+                if let Some(name) = &name {
+                    fetch_skin_texture_by_name(name).await
+                } else {
+                    fetch_skin_texture(&uuid_str).await
+                }
+            } else {
+                match fetch_skin_texture(&uuid_str).await {
+                    Ok(skin) => Ok(skin),
+                    Err(err) => {
+                        if let Some(name) = &name {
+                            fetch_skin_texture_by_name(name).await
+                        } else {
+                            Err(err)
+                        }
+                    }
+                }
+            };
+            let _ = tx.send(res);
         });
-        self.pending_skin = Some((*uuid, rx));
+        self.pending_skin = Some((uuid_val, rx));
+    }
+
+    pub fn apply_user_skin(&mut self, uuid: Option<&uuid::Uuid>, skin: &SkinData) {
+        self.ctx.device.wait_idle();
+        self.hand_pipeline.reload_skin(&self.ctx.device, skin);
+        self.skin_preview.destroy(&self.ctx.device);
+        self.skin_preview = SkinPreviewPipeline::new(
+            &self.ctx.device,
+            self.swapchain.targets(),
+            self.hand_pipeline.skin_texture(),
+            self.hand_pipeline.skin_sampler(),
+            skin.slim,
+        );
+        self.entity_renderer.set_user_skin(&self.ctx.device, skin);
+        if let Some(uuid) = uuid {
+            self.entity_renderer
+                .update_player_skin(&self.ctx.device, uuid, skin);
+        }
+        self.user_skin_data = Some(skin.clone());
+    }
+
+    pub fn user_skin_data(&self) -> Option<&SkinData> {
+        self.user_skin_data.as_ref()
     }
 
     fn apply_fetched_skin(&mut self) {
@@ -1929,19 +1995,7 @@ impl Renderer {
         self.pending_skin = None;
         match skin {
             Ok(skin) => {
-                // In-flight frames may still reference the old skin texture,
-                // hand mesh, and preview pipeline about to be destroyed.
-                self.ctx.device.wait_idle();
-                self.hand_pipeline.reload_skin(&self.ctx.device, &skin);
-                self.skin_preview.destroy(&self.ctx.device);
-                self.skin_preview = SkinPreviewPipeline::new(
-                    &self.ctx.device,
-                    self.swapchain.targets(),
-                    self.hand_pipeline.skin_texture(),
-                    self.hand_pipeline.skin_sampler(),
-                    skin.slim,
-                );
-                self.update_player_entity_skin(&uuid, &skin);
+                self.apply_user_skin(Some(&uuid), &skin);
             }
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),
         }
@@ -1964,6 +2018,14 @@ impl Renderer {
     pub fn update_favicon_atlas(&mut self, favicons: &[(String, Vec<u8>, u32)]) {
         self.menu_pipeline
             .update_favicon_atlas(&self.ctx.device, favicons);
+        self.world_text_pipeline.rebind_font(
+            &self.ctx.device,
+            self.menu_pipeline.mc_font_texture(),
+            self.menu_pipeline.mc_font_color_texture(),
+            self.menu_pipeline.mc_font_sampler(),
+            self.menu_pipeline.favicon_texture(),
+            self.menu_pipeline.sprite_texture(),
+        );
     }
 
     /// Holds the skins player head items are drawn with, by head key.
@@ -2222,7 +2284,8 @@ impl Renderer {
                             let azalea_inventory::ItemStack::Present(data) = item else {
                                 return Vec::new();
                             };
-                            let name = crate::player::inventory::item_resource_name(data.kind);
+                            let base_name = crate::player::inventory::item_resource_name(data.kind);
+                            let name = self.render_assets.stack_model_key(&base_name, data);
                             let tints = self.render_assets.item_tint_palette(
                                 &name,
                                 Some(data),
@@ -2279,6 +2342,9 @@ impl Renderer {
             if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(key, discard) {
                 item_atlas_uvs.insert(key.clone(), self.gui_item_atlas.slot_uv(&slot));
                 if !matches!(state, pipelines::gui_item_atlas::SlotState::Ready) {
+                    if !name.starts_with(HEAD_SKIN_ITEM_PREFIX) {
+                        self.ensure_item_mesh(name);
+                    }
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
@@ -2345,6 +2411,7 @@ impl Renderer {
         if let RenderMode::World {
             particles,
             nameplates,
+            text_displays,
             signs,
             ..
         } = &mode
@@ -2352,6 +2419,7 @@ impl Renderer {
             self.particle_pipeline
                 .prepare(frame, &self.camera, particles);
             let mut text = WorldTextVertices::default();
+            let mut drawn_objects = Vec::new();
             if let Some(glyph_map) = self.menu_pipeline.mc_glyph_map() {
                 let anchor = self.camera.anchor();
                 pipelines::nameplate::push_nameplates(
@@ -2362,7 +2430,26 @@ impl Renderer {
                     glyph_map,
                     nameplates,
                 );
+                let mut text_ctx = pipelines::world_text::WorldTextContext {
+                    glyph_map,
+                    dynamic_regions: Some(self.menu_pipeline.geometry.favicon_regions()),
+                    sprite_atlas: Some(self.menu_pipeline.geometry.sprite_atlas()),
+                    drawn_objects: Some(&mut drawn_objects),
+                };
+                pipelines::text_display::push_text_displays(
+                    &mut text,
+                    &self.camera,
+                    self.camera_render_position(),
+                    anchor,
+                    &mut text_ctx,
+                    text_displays,
+                );
                 pipelines::sign_text::push_signs(&mut text, anchor, glyph_map, signs);
+            }
+            for (key, obj) in drawn_objects {
+                self.menu_pipeline
+                    .geometry
+                    .record_drawn_inline_object(key, obj);
             }
             self.world_text_pipeline.prepare(frame, text);
         }
@@ -2387,6 +2474,7 @@ impl Renderer {
                 block_render,
                 overlay,
                 swing_progress,
+                equip_progress,
                 use_anim,
                 held_items,
                 main_hand_right,
@@ -2405,6 +2493,7 @@ impl Renderer {
                 block_entities,
                 particles: _,
                 nameplates: _,
+                text_displays: _,
                 signs: _,
                 weather,
                 cloud_mode,
@@ -2545,6 +2634,39 @@ impl Renderer {
                         item_entities,
                     );
 
+                    if self.camera.mode != camera::CameraMode::FirstPerson {
+                        let hands: Vec<_> = (0..2)
+                            .filter_map(|arm| {
+                                let hand_mat = self.entity_renderer.local_player_hands[arm]?;
+                                let hand_idx = if *main_hand_right {
+                                    if arm == 0 { 0 } else { 1 }
+                                } else {
+                                    if arm == 1 { 0 } else { 1 }
+                                };
+                                let item = held_items[hand_idx].as_ref()?;
+                                Some(crate::renderer::pipelines::held_item::WorldHand {
+                                    item,
+                                    right_arm: arm == 0,
+                                    in_use: use_anim[hand_idx].is_some(),
+                                    hand: hand_mat,
+                                })
+                            })
+                            .collect();
+                        if !hands.is_empty() {
+                            let (fog_distance, haze_scale) = self.distant_fog(*render_distance, *distant_terrain);
+                            let uniform = CameraUniform::new(&self.camera, sky, fog_distance, *eyes_in_water, haze_scale);
+                            self.held_item_pipeline.draw_world_hands(
+                                &self.ctx.device,
+                                &mut pass,
+                                frame,
+                                &uniform,
+                                &hands,
+                                &self.item_entity_pipeline,
+                                *hand_light,
+                            );
+                        }
+                    }
+
                     // Break particles draw after entities but before translucent
                     // water: they write depth, and pomme's water doesn't, so this
                     // lets water blend over particles behind it (vanilla draws
@@ -2631,6 +2753,7 @@ impl Renderer {
                             aspect,
                             hud_fov,
                             swing_progress[0],
+                            equip_progress[0],
                             *main_hand_right,
                             view_effect,
                             hand_pose,
@@ -2647,6 +2770,7 @@ impl Renderer {
                                 main_hand: i == 0,
                                 right_arm: *main_hand_right == (i == 0),
                                 swing_progress: swing_progress[i],
+                                equip_progress: equip_progress[i],
                                 use_anim: use_anim[i],
                             })
                         })
@@ -2913,6 +3037,7 @@ const HEAD_SKIN_ITEM_PREFIX: &str = "player_head#skin:";
 
 /// Decoded skin ready for upload: always a 64x64 RGBA sheet (legacy 64x32
 /// skins are converted), plus the profile's arm model.
+#[derive(Clone)]
 pub(crate) struct SkinData {
     pub pixels: Vec<u8>,
     pub width: u32,

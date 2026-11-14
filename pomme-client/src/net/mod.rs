@@ -243,6 +243,7 @@ pub enum NetworkEvent {
         container_id: i32,
         menu_type: azalea_registry::builtin::MenuKind,
         title: String,
+        title_spans: Vec<crate::ui::text::TextSpan>,
     },
     OpenSignEditor {
         pos: azalea_core::position::BlockPos,
@@ -613,6 +614,11 @@ pub enum NetworkEvent {
     EntityCustomName {
         id: i32,
         name: Option<String>,
+        spans: Option<Vec<crate::ui::text::TextSpan>>,
+    },
+    TextDisplayText {
+        id: i32,
+        text: Option<String>,
         spans: Option<Vec<crate::ui::text::TextSpan>>,
     },
     EntitySwing {

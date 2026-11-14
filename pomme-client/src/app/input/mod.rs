@@ -534,6 +534,8 @@ impl InputState {
         }
         match action {
             Action::Jump => self.action_held(action) || self.touch.jump_held(),
+            Action::Sneak => self.action_held(action) || self.touch.sneak_held(),
+            Action::ViewPlayerList => self.action_held(action) || self.touch.player_list_held(),
             Action::ToggleInventory => {
                 self.action_just_pressed(action) || self.bound_gamepad_button_down(action)
             }
@@ -541,13 +543,11 @@ impl InputState {
             Action::Close => self.bound_gamepad_button_down(action),
             // DropItem and SwapOffhand are click-count driven (`consume_click`);
             // this is their held state only.
-            Action::Sneak
             | Action::Sprint
             | Action::Destroy
             | Action::Use
             | Action::OpenMenu
-            | Action::ViewPlayerList
-            | Action::ChangePerspective
+                        | Action::ChangePerspective
             | Action::OpenChat
             | Action::OpenCommands
             | Action::DropItem
@@ -1137,6 +1137,10 @@ impl InputState {
                 }
                 TouchOutput::Hotbar(slot) => self.select_hotbar(slot),
                 TouchOutput::PointerMove(p) => self.on_cursor_moved(p.x, p.y),
+                TouchOutput::ToggleKeyboard => {
+                    #[cfg(target_os = "android")]
+                    let _ = crate::util::toggle_soft_keyboard_android();
+                }
             }
         }
     }

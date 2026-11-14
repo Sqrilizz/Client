@@ -6,6 +6,9 @@ pub mod glowing;
 pub mod light;
 pub mod shadow;
 pub mod villager;
+pub mod display;
+
+pub use display::DisplayEntityStore;
 
 use std::collections::HashMap;
 
@@ -16,7 +19,7 @@ use dimensions::EntityDimensions;
 use glam::DVec3;
 
 use crate::attribute::AttributeMap;
-use crate::entity::components::{LookDirection, Position};
+pub use crate::entity::components::{LookDirection, Position};
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::CollisionContext;
@@ -61,6 +64,8 @@ pub enum MetaValue {
     Byte(u8),
     Float(f32),
     Long(i64),
+    Vector3([f32; 3]),
+    Quaternion([f32; 4]),
 }
 
 /// Vanilla `Sniffer.State`, in id order.
@@ -886,6 +891,7 @@ pub struct LivingEntity {
     pub no_ai: bool,
     /// Creeper charged/powered flag — shows the blue aura overlay.
     pub powered: bool,
+    pub is_marker: bool,
     /// Arm-swing animation timer, counts down from `SWING_DURATION` to 0
     /// (driven by the server `Animate` packet). Drives the zombie attack
     /// swing.
@@ -927,6 +933,9 @@ pub(crate) fn baby_dimensions(kind: EntityKind, width: f32, height: f32) -> (f32
 }
 
 pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
+    if entity.entity_type == EntityKind::ArmorStand && entity.is_marker {
+        return EntityDimensions::new(0.0, 0.0);
+    }
     let mut dims = EntityDimensions::of(entity.entity_type);
     // `Sniffer.DIGGING_DIMENSIONS`, then the same age scale.
     if entity.entity_type == EntityKind::Sniffer && entity.sniffer_state == SnifferState::Digging {
@@ -1126,6 +1135,7 @@ impl LivingEntity {
             aggressive: false,
             no_ai: false,
             powered: false,
+            is_marker: false,
             swing_time: 0,
             flapping: 1.0,
             target_squish: 0.0,
@@ -1294,7 +1304,9 @@ impl LivingEntity {
         if self.sleeping_pos.is_some() || is_player && self.health <= 0.0 {
             return 0.2;
         }
-        let height = if is_player && self.is_crouching {
+        let height = if self.entity_type == EntityKind::ArmorStand && self.is_marker {
+            0.0
+        } else if is_player && self.is_crouching {
             // `Avatar.POSES`' crouching height.
             1.5
         } else if self.entity_type == EntityKind::Sniffer {
@@ -2114,6 +2126,7 @@ impl EntityStore {
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
+            (EntityKind::ArmorStand, 15, Byte(f)) => entity.is_marker = f & 0x10 != 0,
             (k, 15, Byte(f)) if k != EntityKind::Player => {
                 entity.no_ai = f & 0x01 != 0;
                 entity.aggressive = f & 0x04 != 0;
@@ -2732,7 +2745,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
         || is_llama(*kind)
         || matches!(
             kind,
-            EntityKind::Player
+            EntityKind::ArmorStand
+                | EntityKind::Player
                 | EntityKind::Bee
                 | EntityKind::Parrot
                 | EntityKind::Pig

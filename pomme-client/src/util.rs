@@ -248,6 +248,164 @@ fn open_url_android(url: &str) -> jni::errors::Result<()> {
 
 /// The mean of the largest `1/per` of `sorted` (ascending), at least one
 /// value: the "1% low" of frame times when `per` is 100.
+
+#[cfg(target_os = "android")]
+pub fn get_clipboard_android() -> Result<String, jni::errors::Error> {
+    use jni::objects::{JObject, JValue};
+    use jni::{jni_sig, jni_str};
+
+    let Some(app) = ANDROID_APP.read().ok().and_then(|app| app.clone()) else {
+        return Ok(String::new());
+    };
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| {
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let service_name = env.new_string("clipboard")?;
+        let clip_service = env
+            .call_method(
+                &activity,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(&service_name)],
+            )?
+            .l()?;
+        if clip_service.is_null() {
+            return Ok(String::new());
+        }
+        let has_clip = env
+            .call_method(
+                &clip_service,
+                jni_str!("hasPrimaryClip"),
+                jni_sig!("()Z"),
+                &[],
+            )?
+            .z()?;
+        if !has_clip {
+            return Ok(String::new());
+        }
+        let clip_data = env
+            .call_method(
+                &clip_service,
+                jni_str!("getPrimaryClip"),
+                jni_sig!("()Landroid/content/ClipData;"),
+                &[],
+            )?
+            .l()?;
+        if clip_data.is_null() {
+            return Ok(String::new());
+        }
+        let item = env
+            .call_method(
+                &clip_data,
+                jni_str!("getItemAt"),
+                jni_sig!("(I)Landroid/content/ClipData;"),
+                &[JValue::Int(0)],
+            )?
+            .l()?;
+        if item.is_null() {
+            return Ok(String::new());
+        }
+        let text_char_seq = env
+            .call_method(
+                &item,
+                jni_str!("coerceToText"),
+                jni_sig!("(Landroid/content/Context;)Ljava/lang/CharSequence;"),
+                &[JValue::Object(&activity)],
+            )?
+            .l()?;
+        if text_char_seq.is_null() {
+            return Ok(String::new());
+        }
+        let text_str = env
+            .call_method(
+                &text_char_seq,
+                jni_str!("toString"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        let res: String = env.get_string(&text_str.into())?.into();
+        Ok(res)
+    })
+}
+
+#[cfg(target_os = "android")]
+pub fn set_clipboard_android(text: &str) -> Result<(), jni::errors::Error> {
+    use jni::objects::{JObject, JValue};
+    use jni::{jni_sig, jni_str};
+
+    let Some(app) = ANDROID_APP.read().ok().and_then(|app| app.clone()) else {
+        return Ok(());
+    };
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| {
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let service_name = env.new_string("clipboard")?;
+        let clip_service = env
+            .call_method(
+                &activity,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(&service_name)],
+            )?
+            .l()?;
+        if clip_service.is_null() {
+            return Ok(());
+        }
+        let label = env.new_string("pomme")?;
+        let text_jstr = env.new_string(text)?;
+        let clip_data = env
+            .call_static_method(
+                jni_str!("android/content/ClipData"),
+                jni_str!("newPlainText"),
+                jni_sig!("(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;"),
+                &[JValue::Object(&label), JValue::Object(&text_jstr)],
+            )?
+            .l()?;
+        env.call_method(
+            &clip_service,
+            jni_str!("setPrimaryClip"),
+            jni_sig!("(Landroid/content/ClipData;)V"),
+            &[JValue::Object(&clip_data)],
+        )?;
+        Ok(())
+    })
+}
+
+
+#[cfg(target_os = "android")]
+pub fn toggle_soft_keyboard_android() -> Result<(), jni::errors::Error> {
+    use jni::objects::{JObject, JValue};
+    use jni::{jni_sig, jni_str};
+
+    let Some(app) = ANDROID_APP.read().ok().and_then(|app| app.clone()) else {
+        return Ok(());
+    };
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| {
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let service_name = env.new_string("input_method")?;
+        let imm = env
+            .call_method(
+                &activity,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(&service_name)],
+            )?
+            .l()?;
+        if imm.is_null() {
+            return Ok(());
+        }
+        env.call_method(
+            &imm,
+            jni_str!("toggleSoftInput"),
+            jni_sig!("(II)V"),
+            &[JValue::Int(2), JValue::Int(0)],
+        )?;
+        Ok(())
+    })
+}
+
 pub fn slowest_mean(sorted: &[f32], per: usize) -> f32 {
     let slowest = &sorted[sorted.len() - sorted.len().div_ceil(per)..];
     slowest.iter().sum::<f32>() / slowest.len() as f32

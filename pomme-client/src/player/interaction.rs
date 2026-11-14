@@ -22,7 +22,7 @@ use crate::app::input::{self, InputState};
 use crate::attribute::{AttributeKind, AttributeMap};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
-use crate::entity::{EntityStore, living_entity_dimensions};
+use crate::entity::{DisplayEntityStore, EntityStore, living_entity_dimensions};
 use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
@@ -209,6 +209,12 @@ pub struct InteractionState {
     /// Vanilla `Player.lastItemInMainHand`; `None` is the empty hand.
     last_item_in_main_hand: Option<ItemStackData>,
     pub item_cooldowns: ItemCooldowns,
+    main_hand_height: f32,
+    o_main_hand_height: f32,
+    equipped_main_item: Option<ItemStackData>,
+    off_hand_height: f32,
+    o_off_hand_height: f32,
+    equipped_off_item: Option<ItemStackData>,
 }
 
 impl InteractionState {
@@ -243,6 +249,12 @@ impl InteractionState {
             attack_strength_ticker: 0,
             last_item_in_main_hand: None,
             item_cooldowns: ItemCooldowns::default(),
+            main_hand_height: 1.0,
+            o_main_hand_height: 1.0,
+            equipped_main_item: None,
+            off_hand_height: 1.0,
+            o_off_hand_height: 1.0,
+            equipped_off_item: None,
         }
     }
 
@@ -427,6 +439,7 @@ impl InteractionState {
         look_dir: LookDirection,
         chunks: &ChunkStore,
         entities: &EntityStore,
+        display_entities: &DisplayEntityStore,
         attributes: &AttributeMap,
         creative: bool,
         held_item: Option<&str>,
@@ -453,7 +466,7 @@ impl InteractionState {
             .unwrap_or(max_dist * max_dist);
         let to = from + dir.as_dvec3() * block_dist_sq.sqrt();
 
-        if let Some(hit) = nearest_entity_hit(from, to, entities) {
+        if let Some(hit) = nearest_entity_hit(from, to, entities, display_entities) {
             let dist_sq = hit.location.distance_squared(from);
             if dist_sq < block_dist_sq {
                 self.target =
@@ -605,13 +618,77 @@ impl InteractionState {
 
     /// Post-movement player state: `Player.aiStep` swings after
     /// `super.aiStep`, still ahead of LocalPlayer's input/movement packets.
-    pub fn tick_player_state(&mut self, cursor_captured: bool, held_stack: Option<&ItemStackData>) {
-        // TODO: vanilla sets missTime = 10000 while a screen is open.
+    pub fn tick_player_state(
+        &mut self,
+        cursor_captured: bool,
+        main_stack: Option<&ItemStackData>,
+        off_stack: Option<&ItemStackData>,
+        attack_delay: f32,
+    ) {
         if cursor_captured && self.miss_time > 0 {
             self.miss_time -= 1;
         }
-        self.tick_cooldowns(held_stack);
+        self.tick_cooldowns(main_stack);
+        self.tick_equip_heights(main_stack, off_stack, attack_delay);
         self.update_swing();
+    }
+
+    fn tick_equip_heights(
+        &mut self,
+        main_stack: Option<&ItemStackData>,
+        off_stack: Option<&ItemStackData>,
+        attack_delay: f32,
+    ) {
+        self.o_main_hand_height = self.main_hand_height;
+        self.o_off_hand_height = self.off_hand_height;
+
+        if self.equipped_main_item.is_none() && self.last_item_in_main_hand.is_none() {
+            self.equipped_main_item = main_stack.cloned();
+            self.equipped_off_item = off_stack.cloned();
+        }
+
+        let main_matches = same_item_same_components(self.equipped_main_item.as_ref(), main_stack);
+        let off_matches = same_item_same_components(self.equipped_off_item.as_ref(), off_stack);
+
+        if main_matches {
+            self.equipped_main_item = main_stack.cloned();
+        }
+        if off_matches {
+            self.equipped_off_item = off_stack.cloned();
+        }
+
+        let attack_scale = self.attack_strength_scale(attack_delay);
+        let target_main = if main_matches {
+            attack_scale * attack_scale * attack_scale
+        } else {
+            0.0
+        };
+        let target_off = if off_matches { 1.0 } else { 0.0 };
+
+        self.main_hand_height += (target_main - self.main_hand_height).clamp(-0.4, 0.4);
+        self.off_hand_height += (target_off - self.off_hand_height).clamp(-0.4, 0.4);
+
+        if self.main_hand_height < 0.1 {
+            self.equipped_main_item = main_stack.cloned();
+        }
+        if self.off_hand_height < 0.1 {
+            self.equipped_off_item = off_stack.cloned();
+        }
+    }
+
+    pub fn equip_progress(&self, hand: InteractionHand, partial_tick: f32) -> f32 {
+        let (o, curr) = match hand {
+            InteractionHand::MainHand => (self.o_main_hand_height, self.main_hand_height),
+            InteractionHand::OffHand => (self.o_off_hand_height, self.off_hand_height),
+        };
+        (o + (curr - o) * partial_tick).clamp(0.0, 1.0)
+    }
+
+    pub fn equipped_item(&self, hand: InteractionHand) -> Option<&ItemStackData> {
+        match hand {
+            InteractionHand::MainHand => self.equipped_main_item.as_ref(),
+            InteractionHand::OffHand => self.equipped_off_item.as_ref(),
+        }
     }
 
     fn pick_block_or_entity(&self, sender: &PacketSender, include_data: bool) {
@@ -1272,6 +1349,7 @@ impl InteractionState {
                 duration: active.duration as f32,
             })),
             ItemUseAnimation::BlockKind => Some(UseAnim::Block),
+            ItemUseAnimation::Bow => Some(UseAnim::Bow),
             _ => None,
         }
     }
@@ -2084,7 +2162,12 @@ pub fn raycast(
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
 /// each entity's bounding box and keeps the nearest hit. A box containing the
 /// ray origin counts as distance zero.
-fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
+fn nearest_entity_hit(
+    from: DVec3,
+    to: DVec3,
+    entities: &EntityStore,
+    display_entities: &DisplayEntityStore,
+) -> Option<EntityHitResult> {
     let mut nearest_dist_sq = f64::MAX;
     let mut nearest = None;
     for (&entity_id, entity) in &entities.living {
@@ -2108,6 +2191,7 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
             });
         }
     }
+    let (_, nearest) = display_entities.nearest_interaction_hit(from, to, nearest_dist_sq, nearest);
     nearest
 }
 

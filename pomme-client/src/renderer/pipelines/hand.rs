@@ -110,6 +110,7 @@ impl HandPipeline {
         aspect: f32,
         hud_fov: f32,
         swing_progress: f32,
+        equip_progress: f32,
         right_arm: bool,
         bob: Mat4,
         hand_pose: Mat4,
@@ -117,7 +118,7 @@ impl HandPipeline {
         cardinal_light: CardinalLightType,
     ) {
         let proj = projection(aspect, hud_fov);
-        let model = arm_matrix(swing_progress, arm_invert(right_arm));
+        let model = arm_matrix(swing_progress, arm_invert(right_arm), equip_progress);
 
         let mvp = proj * bob * model;
         let normal_matrix = Mat3::from_mat4(hand_pose * model).inverse().transpose();
@@ -224,7 +225,7 @@ pub(super) fn arm_invert(right_arm: bool) -> f32 {
 }
 
 /// Vanilla `ItemInHandRenderer.renderPlayerArm`, mirrored by `invert`.
-fn arm_matrix(swing_progress: f32, invert: f32) -> Mat4 {
+fn arm_matrix(swing_progress: f32, invert: f32, equip_progress: f32) -> Mat4 {
     let sp = swing_progress;
     let sqrt_sp = sp.sqrt();
     let pi = std::f32::consts::PI;
@@ -236,14 +237,12 @@ fn arm_matrix(swing_progress: f32, invert: f32) -> Mat4 {
     let swing_y = invert * (sqrt_sp * pi).sin() * 70.0_f32.to_radians();
     let swing_z = invert * (sp * sp * pi).sin() * (-20.0_f32).to_radians();
 
-    // `PlayerModel`'s arm pivots at (-5, 2, 0) on the right and (5, 2, 0)
-    // on the left; `renderHand` sets their zRot to 0.1 and -0.1.
     let pivot = Vec3::new(invert * -5.0 / 16.0, 2.0 / 16.0, 0.0);
     let arm_local_rot = Mat4::from_translation(pivot) * Mat4::from_rotation_z(invert * 0.1);
 
     Mat4::from_translation(Vec3::new(
         invert * (x_off + 0.64),
-        y_off - 0.6,
+        y_off - 0.6 + (1.0 - equip_progress) * -0.6,
         z_off - 0.72,
     )) * Mat4::from_rotation_y((invert * 45.0_f32).to_radians())
         * Mat4::from_rotation_y(swing_y)
@@ -417,11 +416,13 @@ mod tests {
     fn the_left_arm_mirrors_the_right() {
         let flip = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
         for swing in [0.0, 0.3, 0.7, 1.0] {
-            let mirrored = flip * arm_matrix(swing, 1.0) * flip;
-            assert!(
-                arm_matrix(swing, -1.0).abs_diff_eq(mirrored, 1e-4),
-                "swing {swing}"
-            );
+            for equip in [0.0, 0.5, 1.0] {
+                let mirrored = flip * arm_matrix(swing, 1.0, equip) * flip;
+                assert!(
+                    arm_matrix(swing, -1.0, equip).abs_diff_eq(mirrored, 1e-4),
+                    "swing {swing} equip {equip}"
+                );
+            }
         }
         for slim in [false, true] {
             let x_range = |right| {

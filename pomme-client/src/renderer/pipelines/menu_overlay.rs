@@ -598,6 +598,25 @@ impl MenuGeometry {
                         &mut obfuscation_rng,
                     );
                 }
+                MenuElement::TextSpansFlat {
+                    x,
+                    y,
+                    spans,
+                    scale,
+                } => {
+                    self.push_text_into(
+                        &mut drawn_objects,
+                        &mut vertices,
+                        spans,
+                        McTextDraw {
+                            x: *x,
+                            y: *y,
+                            scale: *scale,
+                            drop_shadow: false,
+                        },
+                        &mut obfuscation_rng,
+                    );
+                }
                 MenuElement::Icon {
                     x,
                     y,
@@ -1548,6 +1567,18 @@ impl MenuGeometry {
             self.favicon_regions.insert(key.to_owned(), region);
         }
     }
+
+    pub fn favicon_regions(&self) -> &std::collections::HashMap<String, [f32; 4]> {
+        &self.favicon_regions
+    }
+
+    pub fn sprite_atlas(&self) -> &SpriteAtlas {
+        &self.sprite_atlas
+    }
+
+    pub fn record_drawn_inline_object(&mut self, key: String, object: InlineObject) {
+        self.drawn_inline_objects.entry(key).or_insert(object);
+    }
 }
 
 pub struct MenuOverlayPipeline {
@@ -1768,6 +1799,14 @@ impl MenuOverlayPipeline {
 
     pub fn mc_glyph_map(&self) -> Option<&GlyphMap> {
         self.geometry.mc_glyph_map.as_ref()
+    }
+
+    pub fn favicon_texture(&self) -> rhi::backend::TextureHandle {
+        self.favicon.texture.handle()
+    }
+
+    pub fn sprite_texture(&self) -> rhi::backend::TextureHandle {
+        self.sprite.texture.handle()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2165,6 +2204,12 @@ pub enum MenuElement {
         spans: Vec<crate::ui::text::TextSpan>,
         scale: f32,
         centered: bool,
+    },
+    TextSpansFlat {
+        x: f32,
+        y: f32,
+        spans: Vec<crate::ui::text::TextSpan>,
+        scale: f32,
     },
     TextFlat {
         x: f32,
@@ -2692,18 +2737,24 @@ pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
     ],
 ];
 
-struct SpriteRegion {
-    u0: f32,
-    v0: f32,
-    u1: f32,
-    v1: f32,
-    src_w: f32,
-    src_h: f32,
-    nine_slice_border: f32,
+pub struct SpriteRegion {
+    pub u0: f32,
+    pub v0: f32,
+    pub u1: f32,
+    pub v1: f32,
+    pub src_w: f32,
+    pub src_h: f32,
+    pub nine_slice_border: f32,
 }
 
-struct SpriteAtlas {
-    regions: HashMap<SpriteId, SpriteRegion>,
+pub struct SpriteAtlas {
+    pub(crate) regions: HashMap<SpriteId, SpriteRegion>,
+}
+
+impl SpriteAtlas {
+    pub fn region_uvs(&self, id: SpriteId) -> Option<[f32; 4]> {
+        self.regions.get(&id).map(|r| [r.u0, r.v0, r.u1, r.v1])
+    }
 }
 
 const INV_TEX_W: u32 = 176;
@@ -5286,7 +5337,7 @@ fn push_mc_text(
                 if let Some(shadow_color) = shadow_color {
                     draw_object(px_scale, shadow_color);
                 }
-                draw_object(0.0, span.color);
+                draw_object(0.0, [1.0, 1.0, 1.0, span.color[3]]);
                 drawn_objects.entry(key).or_insert_with(|| object.clone());
                 inline_object_advance(span.bold) * px_scale
             } else {

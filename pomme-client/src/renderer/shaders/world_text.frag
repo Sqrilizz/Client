@@ -5,6 +5,8 @@
 layout(set = 1, binding = 0) uniform texture2DArray font_tex;
 layout(set = 1, binding = 1) uniform texture2DArray font_color_tex;
 layout(set = 1, binding = 2) uniform sampler font_tex_sampler;
+layout(set = 1, binding = 3) uniform texture2D dynamic_tex;
+layout(set = 1, binding = 4) uniform texture2D sprite_tex;
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in float v_layer;
@@ -22,9 +24,16 @@ void main() {
         return;
     }
 
-    float gray = texture(sampler2DArray(font_tex, font_tex_sampler), vec3(v_uv, v_layer)).r;
-    vec4 colored = texture(sampler2DArray(font_color_tex, font_tex_sampler), vec3(v_uv, v_layer));
-    vec4 glyph = mix(vec4(1.0, 1.0, 1.0, gray), colored, v_tex);
+    vec4 glyph;
+    if (v_tex > 2.5) {
+        glyph = texture(sampler2D(sprite_tex, font_tex_sampler), v_uv);
+    } else if (v_tex > 1.5) {
+        glyph = texture(sampler2D(dynamic_tex, font_tex_sampler), v_uv);
+    } else {
+        float gray = texture(sampler2DArray(font_tex, font_tex_sampler), vec3(v_uv, v_layer)).r;
+        vec4 colored = texture(sampler2DArray(font_color_tex, font_tex_sampler), vec3(v_uv, v_layer));
+        glyph = mix(vec4(1.0, 1.0, 1.0, gray), colored, v_tex);
+    }
     if (glyph.a <= 0.05) discard;
     vec3 color = apply_fog(v_color.rgb * glyph.rgb, v_fog, v_fog_color);
     out_color = vec4(color, v_color.a * glyph.a);

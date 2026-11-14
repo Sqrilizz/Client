@@ -47,6 +47,7 @@ pub fn build_crafter(
     data: &[i16],
     spectator: bool,
     title: &str,
+    title_spans: &[crate::ui::text::TextSpan],
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
@@ -61,7 +62,12 @@ pub fn build_crafter(
         166.0,
         SpriteId::CrafterBackground,
     );
-    panel.label(elements, centred_title_x(title, text_width_fn), 6.0, title);
+    let title_x = centred_title_x(title, text_width_fn);
+    if title_spans.is_empty() {
+        panel.label(elements, title_x, 6.0, title);
+    } else {
+        panel.label_spans(elements, title_x, 6.0, title_spans);
+    }
     panel.inventory_label(elements, 72.0);
 
     let mut ctx = SlotCtx::new(elements, &panel, cursor, kind, slots, cursor_item, drag);

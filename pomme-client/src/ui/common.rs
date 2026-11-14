@@ -270,9 +270,8 @@ pub fn push_results_overlay(
 
 /// The system clipboard's text, empty when there's none or it can't be read.
 pub(crate) fn get_clipboard() -> String {
-    // TODO: Android's clipboard is a Java service (ClipboardManager), via JNI.
     #[cfg(target_os = "android")]
-    return String::new();
+    return crate::util::get_clipboard_android().unwrap_or_default();
     // SAFETY: the general pasteboard is safe to use from any thread.
     #[cfg(target_os = "ios")]
     return unsafe { objc2_ui_kit::UIPasteboard::generalPasteboard().string() }
@@ -288,8 +287,7 @@ pub(crate) fn get_clipboard() -> String {
 pub(crate) fn set_clipboard(text: &str) -> bool {
     #[cfg(target_os = "android")]
     {
-        let _ = text;
-        false
+        crate::util::set_clipboard_android(text).is_ok()
     }
     #[cfg(target_os = "ios")]
     {

@@ -1649,17 +1649,24 @@ impl AppCore {
 
     /// Queues a tab-list player's entity skin: the textures the server sent,
     /// else a session-server lookup by id.
-    fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
-        let source = textures
-            .map(PlayerSkinSource::Textures)
-            .unwrap_or(PlayerSkinSource::Uuid);
+    fn queue_player_skin(
+        &mut self,
+        uuid: uuid::Uuid,
+        textures: Option<String>,
+        name: Option<String>,
+    ) {
+        let source = if let Some(textures) = textures {
+            PlayerSkinSource::Textures(textures)
+        } else if uuid.get_version_num() == 3 && let Some(name) = name && !name.is_empty() {
+            PlayerSkinSource::Name(name)
+        } else {
+            PlayerSkinSource::Uuid
+        };
         if self.requested_player_skins.get(&uuid) == Some(&source) {
             return;
         }
         self.requested_player_skins.insert(uuid, source.clone());
 
-        // Name-derived (v3) UUIDs from offline-mode servers have no Mojang
-        // profile to fetch; keep the default skin.
         if matches!(source, PlayerSkinSource::Uuid) && uuid.get_version_num() == 3 {
             return;
         }
@@ -1690,7 +1697,11 @@ impl AppCore {
                         self.player_faces.insert(skin.uuid, face);
                         self.player_faces_dirty = true;
                     }
-                    renderer.update_player_entity_skin(&skin.uuid, &data);
+                    if skin.uuid == self.user.uuid {
+                        renderer.apply_user_skin(Some(&skin.uuid), &data);
+                    } else {
+                        renderer.update_player_entity_skin(&skin.uuid, &data);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load entity player skin for {}: {e}", skin.uuid)
@@ -1926,12 +1937,8 @@ impl AppCore {
         }
         // Its default skin draws until its own arrives.
         self.head_skins_dirty = true;
-        // A `Static` profile with no textures has nothing to fetch: vanilla's
-        // `SkinManager.get` reads the profile's own property and falls back to
-        // the default skin without a lookup.
         let source = match (&profile.textures, &profile.id, &profile.name) {
             (Some(textures), _, _) => Some(PlayerSkinSource::Textures(textures.clone())),
-            _ if profile.is_static() => None,
             (_, Some(_), _) => Some(PlayerSkinSource::Uuid),
             (_, None, Some(name)) if crate::player::valid_player_name(name) => {
                 Some(PlayerSkinSource::Name(name.clone()))
@@ -2058,6 +2065,16 @@ impl AppCore {
         self.head_skins_dirty = true;
         self.game_dynamic_atlas_keys.clear();
         renderer.clear_player_entity_skins();
+        if let Some(skin) = renderer.user_skin_data() {
+            if let Some(face) = crate::renderer::pipelines::menu_overlay::extract_face_8x8(
+                &skin.pixels,
+                skin.width,
+                skin.height,
+            ) {
+                self.player_faces.insert(self.user.uuid, face);
+                self.player_faces_dirty = true;
+            }
+        }
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
@@ -2567,6 +2584,7 @@ impl AppCore {
                     container_id,
                     menu_type,
                     title,
+                    title_spans,
                 } => {
                     use azalea_inventory::ItemStack;
                     use azalea_registry::builtin::MenuKind;
@@ -2609,6 +2627,7 @@ impl AppCore {
                         game.open_container = Some(crate::app::phases::in_game::OpenContainer {
                             id: container_id,
                             title,
+                            title_spans,
                             #[cfg(feature = "test-harness")]
                             menu: menu_type,
                             screen,
@@ -3146,17 +3165,26 @@ impl AppCore {
                             uuid,
                         );
                         if entity_type == azalea_registry::builtin::EntityKind::Player {
-                            let textures = game
+                            let (textures, name) = game
                                 .tab_list
                                 .players
                                 .get(&uuid)
-                                .and_then(|p| p.textures.clone());
-                            self.queue_player_skin(uuid, textures);
+                                .map(|p| (p.textures.clone(), Some(p.name.clone())))
+                                .unwrap_or((None, None));
+                            self.queue_player_skin(uuid, textures, name);
                         }
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
                         game.item_entity_store
                             .spawn_item(id, uuid, position, velocity);
+                    }
+                    if entity_type == azalea_registry::builtin::EntityKind::TextDisplay {
+                        game.display_entity_store
+                            .spawn_text_display(id, position, y_rot_deg, x_rot_deg);
+                    }
+                    if entity_type == azalea_registry::builtin::EntityKind::Interaction {
+                        game.display_entity_store
+                            .spawn_interaction(id, position);
                     }
                 }
                 NetworkEvent::EntityMoved {
@@ -3175,6 +3203,7 @@ impl AppCore {
                         game.entity_store
                             .move_living_delta(id, dx, dy, dz, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        game.display_entity_store.move_delta(id, dx, dy, dz);
                         if let Some(pos) = game.entity_positions.get_mut(&id) {
                             *pos += dvec3(dx, dy, dz);
                             self.audio.update_entity_sound_position(id, *pos);
@@ -3198,6 +3227,7 @@ impl AppCore {
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                         game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                        game.display_entity_store.move_delta(id, dx, dy, dz);
                         if let Some(pos) = game.entity_positions.get_mut(&id) {
                             *pos += dvec3(dx, dy, dz);
                             self.audio.update_entity_sound_position(id, *pos);
@@ -3210,6 +3240,7 @@ impl AppCore {
                     x_rot_deg,
                     on_ground,
                 } => {
+                    game.display_entity_store.rotate(id, y_rot_deg, x_rot_deg);
                     if game.steered_boat() != Some(id) {
                         game.entity_store
                             .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
@@ -3254,6 +3285,7 @@ impl AppCore {
                         }
                         game.item_entity_store
                             .teleport(id, position, velocity, on_ground);
+                        game.display_entity_store.teleport(id, position);
                         game.entity_positions.insert(id, position);
                         self.audio.update_entity_sound_position(id, position);
                     }
@@ -3314,6 +3346,7 @@ impl AppCore {
                         self.audio.stop_entity_sounds(*id);
                     }
                     game.item_entity_store.remove(&ids);
+                    game.display_entity_store.remove(&ids);
                     if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
                         game.controlled_vehicle_id = None;
                     }
@@ -3368,6 +3401,7 @@ impl AppCore {
                             game.item_entity_store.set_shared_flags(id, flags);
                         }
                     }
+                    game.display_entity_store.apply_data(id, index, &value);
                     game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
@@ -3470,7 +3504,11 @@ impl AppCore {
                         .set_villager_data(id, kind, profession, level);
                 }
                 NetworkEvent::EntityCustomName { id, name, spans } => {
+                    game.display_entity_store.set_custom_name(id, name.clone(), spans.clone());
                     game.entity_store.set_custom_name(id, name, spans);
+                }
+                NetworkEvent::TextDisplayText { id, text, spans } => {
+                    game.display_entity_store.set_text(id, text, spans);
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
@@ -3653,6 +3691,7 @@ impl AppCore {
                     self.audio.stop_all_sounds();
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
+                    game.display_entity_store = crate::entity::DisplayEntityStore::new();
                     game.entity_positions.clear();
                     game.entity_kinds.clear();
                     game.vehicle_passengers.clear();
@@ -3675,11 +3714,19 @@ impl AppCore {
                 NetworkEvent::PlayerInfoUpdate { actions, entries } => {
                     if actions.add_player {
                         for entry in &entries {
-                            self.queue_player_skin(entry.uuid, entry.textures.clone());
+                            self.queue_player_skin(
+                                entry.uuid,
+                                entry.textures.clone(),
+                                Some(entry.name.clone()),
+                            );
                         }
                     } else {
                         for entry in entries.iter().filter(|e| e.textures.is_some()) {
-                            self.queue_player_skin(entry.uuid, entry.textures.clone());
+                            self.queue_player_skin(
+                                entry.uuid,
+                                entry.textures.clone(),
+                                Some(entry.name.clone()),
+                            );
                         }
                     }
                     game.tab_list.apply_update(&actions, &entries);
@@ -4173,6 +4220,7 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
+            &game.display_entity_store,
             &game.player.attributes,
             creative,
             held_item.as_deref(),
@@ -4294,8 +4342,9 @@ impl AppCore {
             };
         }
 
+        let attack_delay = crate::player::interaction::attack_strength_delay(&game.player.attributes);
         game.interaction
-            .tick_player_state(input.is_cursor_captured(), held_stack);
+            .tick_player_state(input.is_cursor_captured(), hand_stacks[0], hand_stacks[1], attack_delay);
 
         Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);

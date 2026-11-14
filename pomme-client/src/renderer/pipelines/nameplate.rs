@@ -82,7 +82,13 @@ pub fn push_nameplates(
                 color[3] *= alpha;
                 color
             };
-            push_spans(verts, glyph_map, &spans, start_x, &at, &faded, light);
+            let mut ctx = crate::renderer::pipelines::world_text::WorldTextContext {
+                glyph_map,
+                dynamic_regions: None,
+                sprite_atlas: None,
+                drawn_objects: None,
+            };
+            push_spans(verts, &mut ctx, &spans, start_x, &at, &faded, None, light);
         };
 
         // `SubmitNodeCollection.submitNameTag` at the default text

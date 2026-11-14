@@ -290,7 +290,7 @@ impl SkinPreviewPipeline {
         // Vanilla's head angles: the half turn about X between its model
         // space and this mesh's keeps the pitch and flips the yaw.
         let head = Vec2::new(head_pitch_rad, body_rot_rad - head_yaw_rad);
-        let arm_rots = self.swung([0, 1].map(|i| arm_poses[i].pose(Vec3::ZERO, i == 0, head)));
+        let arm_rots = self.swung([0, 1].map(|i| arm_poses[i].pose(Vec3::ZERO, i == 0, head, 0.0)));
         self.record(
             pass,
             frame,

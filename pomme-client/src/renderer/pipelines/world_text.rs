@@ -2,13 +2,16 @@
 //! ([`super::nameplate`]) and sign text ([`super::sign_text`]) build their
 //! quads with [`push_spans`] and draw through one [`WorldTextPipeline`].
 
+use std::collections::HashMap;
+
 use glam::Vec3;
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::pipelines::lightmap::Lightmap;
+use crate::renderer::pipelines::menu_overlay::{SpriteAtlas, SpriteId};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, rhi, shader, util};
 use crate::ui::font::{GLYPH_ATLAS_SIZE, GlyphMap};
-use crate::ui::text::TextSpan;
+use crate::ui::text::{InlineObject, TextSpan};
 
 pub const MAX_WORLD_TEXT_VERTS: usize = 65536;
 
@@ -66,6 +69,8 @@ impl WorldTextPipeline {
         font_texture: rhi::backend::TextureHandle,
         font_color_texture: rhi::backend::TextureHandle,
         font_sampler: rhi::backend::Sampler,
+        dynamic_texture: rhi::backend::TextureHandle,
+        sprite_texture: rhi::backend::TextureHandle,
         lightmap: &Lightmap,
     ) -> Self {
         let camera_layout = rhi::backend::create_bind_group_layout(device, util::VERTEX_UNIFORM);
@@ -75,6 +80,8 @@ impl WorldTextPipeline {
                 rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
                 rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
                 rhi::BindGroupLayoutEntry::sampler(rhi::ShaderStages::FRAGMENT),
+                rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
+                rhi::BindGroupLayoutEntry::texture(rhi::ShaderStages::FRAGMENT),
             ],
         );
         let pipeline_layout = rhi::backend::create_pipeline_layout(
@@ -102,6 +109,14 @@ impl WorldTextPipeline {
                     rhi::backend::BindingResource::Texture(font_color_texture),
                 ),
                 (2, rhi::backend::BindingResource::Sampler(font_sampler)),
+                (
+                    3,
+                    rhi::backend::BindingResource::Texture(dynamic_texture),
+                ),
+                (
+                    4,
+                    rhi::backend::BindingResource::Texture(sprite_texture),
+                ),
             ],
         );
 
@@ -133,6 +148,8 @@ impl WorldTextPipeline {
         font_texture: rhi::backend::TextureHandle,
         font_color_texture: rhi::backend::TextureHandle,
         font_sampler: rhi::backend::Sampler,
+        dynamic_texture: rhi::backend::TextureHandle,
+        sprite_texture: rhi::backend::TextureHandle,
     ) {
         self.font_set.replace(
             device,
@@ -144,6 +161,14 @@ impl WorldTextPipeline {
                     rhi::backend::BindingResource::Texture(font_color_texture),
                 ),
                 (2, rhi::backend::BindingResource::Sampler(font_sampler)),
+                (
+                    3,
+                    rhi::backend::BindingResource::Texture(dynamic_texture),
+                ),
+                (
+                    4,
+                    rhi::backend::BindingResource::Texture(sprite_texture),
+                ),
             ],
         );
     }
@@ -283,13 +308,28 @@ pub(crate) fn push_quad(
 /// The glyphs of `spans` from text x `start_x` on a line whose top is text
 /// y 0; `at` maps text space (x right, y down) to world space and `color`
 /// gives each span's colour.
+pub struct WorldTextContext<'a> {
+    pub glyph_map: &'a GlyphMap,
+    pub dynamic_regions: Option<&'a HashMap<String, [f32; 4]>>,
+    pub sprite_atlas: Option<&'a SpriteAtlas>,
+    pub drawn_objects: Option<&'a mut Vec<(String, InlineObject)>>,
+}
+
+fn object_has_glyph(object: &InlineObject) -> bool {
+    match object {
+        InlineObject::Player { .. } => true,
+        InlineObject::AtlasSprite { atlas, .. } => crate::ui::object_glyph::is_known_atlas(atlas),
+    }
+}
+
 pub(crate) fn push_spans(
     verts: &mut Vec<WorldTextVertex>,
-    glyph_map: &GlyphMap,
+    ctx: &mut WorldTextContext<'_>,
     spans: &[TextSpan],
     start_x: f32,
     at: &dyn Fn(f32, f32) -> Vec3,
     color: &dyn Fn(&TextSpan) -> [f32; 4],
+    object_color: Option<&dyn Fn(&TextSpan) -> [f32; 4]>,
     light: f32,
 ) {
     let inv_atlas = 1.0 / GLYPH_ATLAS_SIZE as f32;
@@ -298,7 +338,46 @@ pub(crate) fn push_spans(
         let color = color(span);
         let font = span.font.as_deref();
         for ch in span.text.chars() {
-            let gi = glyph_map.glyph(ch, font);
+            if ch == '\u{fffc}'
+                && let Some(object) = span.inline_object.as_ref()
+                && object_has_glyph(object)
+            {
+                let key = object.atlas_key();
+                let (uv, tex) = if let Some(regions) = ctx.dynamic_regions
+                    && let Some(r) = regions.get(&key)
+                {
+                    (*r, 2.0)
+                } else if let Some(sprite_atlas) = ctx.sprite_atlas
+                    && let Some(r) = sprite_atlas.region_uvs(match object {
+                        InlineObject::Player { .. } => SpriteId::SteveHead,
+                        InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
+                    })
+                {
+                    (r, 3.0)
+                } else {
+                    ([0.0; 4], -1.0)
+                };
+                if let Some(drawn) = ctx.drawn_objects.as_mut() {
+                    drawn.push((key, object.clone()));
+                }
+                if tex >= 0.0 {
+                    let obj_c = match object_color {
+                        Some(f) => f(span),
+                        None => [1.0, 1.0, 1.0, color[3]],
+                    };
+                    let corners = [
+                        at(cur_x, 0.0),
+                        at(cur_x + 8.0, 0.0),
+                        at(cur_x + 8.0, 8.0),
+                        at(cur_x, 8.0),
+                    ];
+                    push_quad(verts, corners, uv, 0.0, tex, obj_c, light);
+                }
+                cur_x += 8.0 + if span.bold { 1.0 } else { 0.0 };
+                continue;
+            }
+
+            let gi = ctx.glyph_map.glyph(ch, font);
             if gi.pixel_w > 0 && gi.pixel_h > 0 {
                 let offsets: &[f32] = if span.bold {
                     &[0.0, gi.bold_offset]
@@ -332,21 +411,26 @@ pub(crate) fn push_spans(
     }
 }
 
-/// `Font.width`.
 pub(crate) fn spans_width(spans: &[TextSpan], glyph_map: &GlyphMap) -> f32 {
     spans_advance(spans, glyph_map).ceil()
 }
 
-/// `StringSplitter.stringWidth`: the unrounded advance.
 pub(crate) fn spans_advance(spans: &[TextSpan], glyph_map: &GlyphMap) -> f32 {
     let mut w = 0.0f32;
     for span in spans {
         let font = span.font.as_deref();
         for ch in span.text.chars() {
-            let gi = glyph_map.glyph(ch, font);
-            w += gi.advance;
-            if span.bold {
-                w += gi.bold_offset;
+            if ch == '\u{fffc}'
+                && let Some(object) = span.inline_object.as_ref()
+                && object_has_glyph(object)
+            {
+                w += 8.0 + if span.bold { 1.0 } else { 0.0 };
+            } else {
+                let gi = glyph_map.glyph(ch, font);
+                w += gi.advance;
+                if span.bold {
+                    w += gi.bold_offset;
+                }
             }
         }
     }

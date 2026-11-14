@@ -94,7 +94,13 @@ pub fn push_signs(
                     let at =
                         |x: f32, ty: f32| m.transform_point3(Vec3::new(x + dx, y + ty + dy, 0.0));
                     let color = |span: &TextSpan| color.unwrap_or(span.color);
-                    push_spans(verts, glyph_map, &shown, x1, &at, &color, light);
+                    let mut ctx = crate::renderer::pipelines::world_text::WorldTextContext {
+                        glyph_map,
+                        dynamic_regions: None,
+                        sprite_atlas: None,
+                        drawn_objects: None,
+                    };
+                    push_spans(verts, &mut ctx, &shown, x1, &at, &color, None, light);
                 }
             }
         }

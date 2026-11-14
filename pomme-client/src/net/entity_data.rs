@@ -34,7 +34,7 @@ pub(super) fn handle_raw_entity_data(
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
-    if packet_id != item_codec::item_packet_ids().set_entity_data || !item_codec::native_session() {
+    if packet_id != item_codec::item_packet_ids().set_entity_data {
         return None;
     }
     Some(read_entity_data(payload).map(|(id, values)| {
@@ -167,6 +167,24 @@ fn send_data_value(
             };
             NetworkEvent::EntityCustomName { id, name, spans }
         }
+        (23, Value::Component(nbt) | Value::OptionalComponent(Some(nbt))) => {
+            let (name, spans) = match super::chat::read_component(nbt, &mut 0) {
+                Ok(component) => {
+                    let plain = component.plain_text();
+                    let spans = crate::ui::text::format_component_spans(
+                        &component,
+                        [1.0, 1.0, 1.0, 1.0],
+                    );
+                    let spans = crate::ui::text::legacy_format_spans(&spans, true);
+                    (Some(plain), Some(spans))
+                }
+                Err(e) => {
+                    tracing::debug!("Skipping unreadable display text: {e}");
+                    return;
+                }
+            };
+            NetworkEvent::TextDisplayText { id, text: name, spans }
+        }
         (18, Value::Variant(Variant::Cow, v)) => variant(EntityKind::Cow, *v),
         (18, Value::Variant(Variant::Chicken, v)) => variant(EntityKind::Chicken, *v),
         // Cat / wolf variants: 20 / 23 on 26.x, one lower on 1.21.9-1.21.11
@@ -213,6 +231,8 @@ fn send_scalar(id: i32, index: u8, value: &Value, event_tx: &Sender<NetworkEvent
         Value::Byte(v) => MetaValue::Byte(*v),
         Value::Float(v) => MetaValue::Float(*v),
         Value::Long(v) => MetaValue::Long(*v),
+        Value::Vector3(v) => MetaValue::Vector3(*v),
+        Value::Quaternion(q) => MetaValue::Quaternion(*q),
         _ => return,
     };
     send_ordered(event_tx, NetworkEvent::EntityData { id, index, value });
@@ -226,6 +246,11 @@ pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
         EntityDataValue::Long(v) => Value::Long(*v),
         EntityDataValue::Float(v) => Value::Float(*v),
         EntityDataValue::Boolean(v) => Value::Bool(*v),
+        EntityDataValue::FormattedText(text) => {
+            let mut nbt = Vec::new();
+            text.azalea_write(&mut nbt).ok()?;
+            Value::Component(nbt.into())
+        }
         EntityDataValue::OptionalFormattedText(text) => Value::OptionalComponent(match text {
             Some(text) => {
                 let mut nbt = Vec::new();
@@ -253,6 +278,8 @@ pub(super) fn from_azalea(value: &EntityDataValue) -> Option<Value> {
         // TODO: azalea's `ArmadilloStateKind` lacks UNROLLING (id 3), so a
         // translated session fails to decode that state.
         EntityDataValue::ArmadilloState(state) => Value::Int(*state as i32),
+        EntityDataValue::Vector3(v) => Value::Vector3([v.x, v.y, v.z]),
+        EntityDataValue::Quaternion(q) => Value::Quaternion([q.x, q.y, q.z, q.w]),
         _ => return None,
     })
 }

@@ -207,6 +207,7 @@ pub fn build_enchantment(
     slots: &[ItemStack],
     data: &[i16],
     title: &str,
+    title_spans: &[crate::ui::text::TextSpan],
     state: &EnchantState,
     partial_tick: f32,
     registries: &RegistryHolder,
@@ -228,7 +229,11 @@ pub fn build_enchantment(
         SpriteId::EnchantingTableBackground,
     );
     elements.push(MenuElement::PictureInPicture);
-    panel.label(elements, 8.0, 6.0, title);
+    if title_spans.is_empty() {
+        panel.label(elements, 8.0, 6.0, title);
+    } else {
+        panel.label_spans(elements, 8.0, 6.0, title_spans);
+    }
     panel.inventory_label(elements, 72.0);
 
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);

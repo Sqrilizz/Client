@@ -224,9 +224,12 @@ pub struct EntityRenderInfo {
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
     pub attack_time: f32,
+    pub right_arm_pose: entity_model::HumanoidArmPose,
+    pub left_arm_pose: entity_model::HumanoidArmPose,
     /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
     /// the camera and must never blink out).
     pub skip_cull: bool,
+    pub is_local_player: bool,
     pub shadow: super::entity_shadow::ShadowCaster,
     /// The glowing outline's colour (vanilla `EntityRenderState.outlineColor`),
     /// when the entity draws one.
@@ -311,7 +314,10 @@ impl Default for EntityRenderInfo {
             body_transform: None,
             age_in_ticks: 0.0,
             attack_time: 0.0,
+            right_arm_pose: entity_model::HumanoidArmPose::Empty,
+            left_arm_pose: entity_model::HumanoidArmPose::Empty,
             skip_cull: false,
+            is_local_player: false,
             outline_color: None,
             visibility: Visibility::Visible,
             shadow: Default::default(),
@@ -891,6 +897,8 @@ pub struct EntityRenderer {
     armor_assets: HashMap<String, ArmorAsset>,
     armor_meshes: ArmorMeshes,
     player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
+    user_skin: Option<PlayerSkinTexture>,
+    pub local_player_hands: [Option<glam::Mat4>; 2],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2379,6 +2387,8 @@ impl EntityRenderer {
             armor_assets,
             armor_meshes,
             player_skins: HashMap::new(),
+            user_skin: None,
+            local_player_hands: [None, None],
         }
     }
 
@@ -2487,11 +2497,52 @@ impl EntityRenderer {
         }
     }
 
+    pub fn set_user_skin(
+        &mut self,
+        device: &rhi::backend::Device,
+        skin: &crate::renderer::SkinData,
+    ) {
+        let texture = util::create_sampled_texture(
+            device,
+            "user_skin_texture",
+            &skin.pixels,
+            skin.width,
+            skin.height,
+        );
+        let set = util::create_texture_group(
+            device,
+            self.texture_layout,
+            texture.handle(),
+            self.texture_sampler,
+        );
+        if let Some(old) = self.user_skin.replace(PlayerSkinTexture {
+            texture,
+            set,
+            slim: skin.slim,
+        }) {
+            free_player_skin_texture(device, old);
+        }
+    }
+
     fn player_skin(&self, info: &EntityRenderInfo) -> Option<&PlayerSkinTexture> {
         if info.entity_kind != EntityKind::Player {
             return None;
         }
-        self.player_skins.get(info.player_uuid.as_ref()?)
+        if info.is_local_player {
+            if let Some(skin) = &self.user_skin {
+                return Some(skin);
+            }
+        }
+        if let Some(uuid) = info.player_uuid.as_ref() {
+            if let Some(skin) = self.player_skins.get(uuid) {
+                return Some(skin);
+            }
+        }
+        if info.is_local_player {
+            self.user_skin.as_ref()
+        } else {
+            None
+        }
     }
 
     fn player_texture_set(
@@ -2653,6 +2704,10 @@ impl EntityRenderer {
                 info.walk_anim_speed,
                 info.is_crouching,
                 info.is_passenger,
+                info.attack_time,
+                info.right_arm_pose,
+                info.left_arm_pose,
+                info.age_in_ticks,
             ),
             AnimationType::Enderman => entity_model::compute_enderman_anim(
                 model,
@@ -2981,6 +3036,7 @@ impl EntityRenderer {
         if shadow.is_none() {
             self.outline_records = Default::default();
             self.pack_layers = Default::default();
+            self.local_player_hands = [None, None];
         }
         if entities.is_empty() {
             return;
@@ -3009,6 +3065,22 @@ impl EntityRenderer {
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
                 // Shared with every overlay that isn't `own_pivots`.
                 let part_transforms = variant.model.compute_part_transforms(&anim);
+                if info.is_local_player && shadow.is_none() {
+                    let right_arm_idx = variant.model.parts.iter().position(|p| p.name == "right_arm");
+                    let left_arm_idx = variant.model.parts.iter().position(|p| p.name == "left_arm");
+                    for (arm, part_idx) in [(0, right_arm_idx), (1, left_arm_idx)] {
+                        if let Some(idx) = part_idx {
+                            let side = if arm == 0 { 1.0 } else { -1.0 };
+                            let hand_mat = entity_mat
+                                * part_transforms[idx]
+                                * glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0))
+                                * glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                                * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                                * glam::Mat4::from_translation(glam::Vec3::new(side, 2.0, -10.0) / 16.0);
+                            self.local_player_hands[arm] = Some(hand_mat);
+                        }
+                    }
+                }
                 vis.push(VisEntity {
                     info,
                     entry,
@@ -3354,6 +3426,9 @@ impl EntityRenderer {
             }
         }
         for (_, skin) in self.player_skins.drain() {
+            free_player_skin_texture(device, skin);
+        }
+        if let Some(skin) = self.user_skin.take() {
             free_player_skin_texture(device, skin);
         }
 
