@@ -5753,8 +5753,6 @@ dependencies = [
 [[package]]
 name = "simdnbt"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7893a73842e21e674dde2bb31be1b949c127294f13dd52ee530d2f75a90ffe44"
 dependencies = [
  "byteorder",
  "flate2",

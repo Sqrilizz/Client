@@ -4,9 +4,6 @@ use pomme_client::{AndroidApp, LAUNCH_FILE, LaunchArgs, Platform};
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
-    unsafe {
-        libc::prctl(55, 0, 0, 0, 0);
-    }
     pomme_client::install_panic_hook();
     let files = app
         .internal_data_path()
