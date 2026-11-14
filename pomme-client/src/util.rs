@@ -324,7 +324,13 @@ pub fn get_clipboard_android() -> Result<String, jni::errors::Error> {
                 &[],
             )?
             .l()?;
-        let res: String = env.get_string(&text_str.into())?.into();
+        let res = if !text_str.is_null() {
+            let jstr = unsafe { jni::objects::JString::from_raw(env, text_str.into_raw()) };
+            let s: String = env.get_string(&jstr)?.into();
+            s
+        } else {
+            String::new()
+        };
         Ok(res)
     })
 }
