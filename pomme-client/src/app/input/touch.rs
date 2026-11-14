@@ -34,10 +34,11 @@ pub enum TouchButton {
     Sneak,
     Primary,
     Secondary,
+    MouseToggle,
 }
 
 impl TouchButton {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Jump,
         Self::Chat,
         Self::Inventory,
@@ -49,6 +50,7 @@ impl TouchButton {
         Self::Sneak,
         Self::Primary,
         Self::Secondary,
+        Self::MouseToggle,
     ];
 
     pub fn label(self) -> &'static str {
@@ -64,6 +66,7 @@ impl TouchButton {
             Self::Sneak => "Snk",
             Self::Primary => "PRI",
             Self::Secondary => "SEC",
+            Self::MouseToggle => "Mouse",
         }
     }
 
@@ -80,6 +83,7 @@ impl TouchButton {
             Self::Sneak => None,
             Self::Primary => None,
             Self::Secondary => None,
+            Self::MouseToggle => None,
         }
     }
 }
@@ -98,6 +102,7 @@ impl TouchLayout {
             TouchButton::ThirdPerson => Vec2::new(self.width - 7.0 * inset, inset),
             TouchButton::Debug => Vec2::new(inset, inset),
             TouchButton::PlayerList => Vec2::new(2.5 * inset, inset),
+            TouchButton::MouseToggle => Vec2::new(4.0 * inset, inset),
             TouchButton::Sneak => Vec2::new(self.width - 4.0 * inset, self.height - 1.5 * inset),
         }
     }
@@ -130,6 +135,7 @@ pub enum TouchOutput {
     PointerMove(Vec2),
     PointerDown,
     PointerUp,
+    RightClick,
     ToggleKeyboard,
 }
 
@@ -150,15 +156,31 @@ enum Role {
     Primary,
     Secondary,
     PlayerList,
+    VirtualMouseTrack {
+        last: Vec2,
+    },
     Pointer,
     Spent,
 }
 
-#[derive(Default)]
 pub struct TouchControls {
     touches: HashMap<u64, Role>,
     seen: bool,
     sneak_locked: bool,
+    virtual_mouse_mode: bool,
+    virtual_cursor_pos: Vec2,
+}
+
+impl Default for TouchControls {
+    fn default() -> Self {
+        Self {
+            touches: HashMap::new(),
+            seen: false,
+            sneak_locked: false,
+            virtual_mouse_mode: false,
+            virtual_cursor_pos: Vec2::new(400.0, 300.0),
+        }
+    }
 }
 
 impl TouchControls {
@@ -168,6 +190,14 @@ impl TouchControls {
 
     pub fn is_sneak_locked(&self) -> bool {
         self.sneak_locked
+    }
+
+    pub fn is_virtual_mouse_mode(&self) -> bool {
+        self.virtual_mouse_mode
+    }
+
+    pub fn virtual_cursor_position(&self) -> Vec2 {
+        self.virtual_cursor_pos
     }
 
     pub fn on_touch(
@@ -204,9 +234,32 @@ impl TouchControls {
         } else if let Some(button) = layout.button_at(p) {
             match button {
                 TouchButton::Jump => (Role::Jump, Vec::new()),
-                TouchButton::Primary => (Role::Primary, vec![TouchOutput::DestroyStart]),
-                TouchButton::Secondary => (Role::Secondary, vec![TouchOutput::Use]),
+                TouchButton::Primary => {
+                    if self.virtual_mouse_mode {
+                        (Role::Primary, vec![TouchOutput::PointerDown])
+                    } else {
+                        (Role::Primary, vec![TouchOutput::DestroyStart])
+                    }
+                }
+                TouchButton::Secondary => {
+                    if self.virtual_mouse_mode {
+                        (Role::Secondary, vec![TouchOutput::RightClick])
+                    } else {
+                        (Role::Secondary, vec![TouchOutput::Use])
+                    }
+                }
                 TouchButton::PlayerList => (Role::PlayerList, Vec::new()),
+                TouchButton::MouseToggle => {
+                    self.virtual_mouse_mode = !self.virtual_mouse_mode;
+                    if self.virtual_mouse_mode {
+                        self.virtual_cursor_pos =
+                            Vec2::new(layout.width / 2.0, layout.height / 2.0);
+                    }
+                    (
+                        Role::Spent,
+                        vec![TouchOutput::PointerMove(self.virtual_cursor_pos)],
+                    )
+                }
                 TouchButton::Sneak => {
                     self.sneak_locked = !self.sneak_locked;
                     (Role::Spent, Vec::new())
@@ -228,6 +281,8 @@ impl TouchControls {
                 },
                 Vec::new(),
             )
+        } else if self.virtual_mouse_mode {
+            (Role::VirtualMouseTrack { last: p }, Vec::new())
         } else {
             (
                 Role::Look {
@@ -249,6 +304,13 @@ impl TouchControls {
             Some(Role::Stick { current, .. }) => {
                 *current = p;
                 Vec::new()
+            }
+            Some(Role::VirtualMouseTrack { last }) => {
+                let delta = p - *last;
+                *last = p;
+                self.virtual_cursor_pos = (self.virtual_cursor_pos + delta)
+                    .clamp(Vec2::ZERO, Vec2::new(layout.width, layout.height));
+                vec![TouchOutput::PointerMove(self.virtual_cursor_pos)]
             }
             Some(Role::Look {
                 start, last, still, ..
@@ -279,11 +341,17 @@ impl TouchControls {
             {
                 vec![TouchOutput::Use]
             }
-            Some(Role::Primary) => vec![if gameplay {
-                TouchOutput::DestroyEnd
-            } else {
-                TouchOutput::DestroyCancel
-            }],
+            Some(Role::Primary) => {
+                if self.virtual_mouse_mode {
+                    vec![TouchOutput::PointerUp]
+                } else {
+                    vec![if gameplay {
+                        TouchOutput::DestroyEnd
+                    } else {
+                        TouchOutput::DestroyCancel
+                    }]
+                }
+            }
             Some(Role::Pointer) => vec![TouchOutput::PointerUp],
             _ => Vec::new(),
         }
@@ -364,12 +432,12 @@ mod tests {
     use super::{Action, TouchButton, TouchControls, TouchLayout, TouchOutput};
 
     const LAYOUT: TouchLayout = TouchLayout {
-        width: 800.0,
-        height: 600.0,
+        width: 1600.0,
+        height: 900.0,
         gs: 2.0,
     };
-    const STICK: Vec2 = Vec2::new(100.0, 500.0);
-    const LOOK: Vec2 = Vec2::new(500.0, 300.0);
+    const LOOK: Vec2 = Vec2::new(1000.0, 400.0);
+    const STICK: Vec2 = Vec2::new(200.0, 600.0);
 
     fn ms(start: Instant, ms: u64) -> Instant {
         start + Duration::from_millis(ms)
@@ -537,6 +605,14 @@ mod tests {
         assert!(c.sneak_held());
         touch(&mut c, 9, TouchPhase::Started, snk, t);
         assert!(!c.sneak_held());
+
+        let mouse_btn = LAYOUT.button_centre(TouchButton::MouseToggle);
+        assert!(!c.is_virtual_mouse_mode());
+        assert_eq!(
+            touch(&mut c, 10, TouchPhase::Started, mouse_btn, t),
+            [TouchOutput::PointerMove(Vec2::new(800.0, 450.0))]
+        );
+        assert!(c.is_virtual_mouse_mode());
 
         let first_slot = Vec2::new(LAYOUT.width / 2.0 - 91.0 * 2.0 + 10.0, LAYOUT.height - 10.0);
         assert_eq!(

@@ -1117,6 +1117,10 @@ impl InputState {
                 TouchOutput::PointerUp => {
                     self.on_mouse_button(MouseButton::Left, ElementState::Released);
                 }
+                TouchOutput::RightClick => {
+                    self.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+                    self.on_mouse_button(MouseButton::Right, ElementState::Released);
+                }
                 TouchOutput::DestroyStart => {
                     self.touch_actions_down.insert(Action::Destroy);
                     self.recent_actions.insert(Action::Destroy, true);
