@@ -3658,6 +3658,7 @@ pub fn update_game(
                 &mut elements,
                 &layout,
                 core.input.touch(),
+                false,
             );
         }
     }
@@ -4730,6 +4731,20 @@ pub fn update_game(
         &game.interaction.item_cooldowns,
         partial_tick,
     );
+
+    if core.input.touch().seen() && !game.world_has_pointer() {
+        let layout = input::touch::TouchLayout {
+            width: sw,
+            height: sh,
+            gs,
+        };
+        crate::ui::touch_controls::build_touch_controls(
+            &mut elements,
+            &layout,
+            core.input.touch(),
+            true,
+        );
+    }
 
     if screen_pointer != game.screen_pointer {
         game.screen_pointer = screen_pointer;

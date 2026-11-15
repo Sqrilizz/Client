@@ -716,6 +716,8 @@ struct Ids777 {
     accept_teleportation_id: u32,
     accept_teleportation_old_id: u32,
     move_player_pos_rot_id: u32,
+    sign_update_id: u32,
+    sign_update_old_id: u32,
 }
 
 /// Native-space dispatch ids for the frame rewrites protocol 763 needs, plus

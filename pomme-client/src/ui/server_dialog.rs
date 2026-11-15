@@ -2589,6 +2589,8 @@ fn draw_input(
                         let pos = field.pos_from_click(rel_x, inner_w, &wf);
                         field.on_click(pos, ctx.input.shift, inner_w, &wf);
                         field.set_focused(true);
+                        #[cfg(target_os = "android")]
+                        let _ = crate::util::toggle_soft_keyboard_android();
                     }
                 }
                 TextField::Multi(field) => {
@@ -2605,6 +2607,8 @@ fn draw_input(
                         field.seek_cursor_to_point(rel_x, rel_y, LINE_H * gs, &wf);
                         field.set_selecting(false);
                         field.set_focused(true);
+                        #[cfg(target_os = "android")]
+                        let _ = crate::util::toggle_soft_keyboard_android();
                     }
                     field.scroll_to_cursor(box_h * gs, LINE_H * gs, TEXT_PADDING * gs);
                     draw.text_area(box_rect, field, focused, ctx.measure);

@@ -4969,6 +4969,24 @@ fn translate_outbound_777() {
         vec![frame(old_sb("move_player_pos_rot"), &pos_rot)]
     );
 
+    let pos = [0, 0, 0, 0, 0, 0, 0, 42];
+    let mut sign_payload = pos.to_vec();
+    sign_payload.push(1);
+    for line in ["one", "two", "three", "four"] {
+        sign_payload.push(line.len() as u8);
+        sign_payload.extend_from_slice(line.as_bytes());
+    }
+    let mut expected_sign = pos.to_vec();
+    for line in ["one", "two", "three", "four"] {
+        expected_sign.push(line.len() as u8);
+        expected_sign.extend_from_slice(line.as_bytes());
+    }
+    expected_sign.push(1);
+    assert_eq!(
+        t.translate_outbound_game_frame(frame(sb("sign_update"), &sign_payload)),
+        vec![frame(old_sb("sign_update"), &expected_sign)]
+    );
+
     assert!(!t.reports_use_swings());
     assert!(translation_for(775).reports_use_swings());
 }

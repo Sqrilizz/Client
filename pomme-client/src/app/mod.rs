@@ -1407,10 +1407,14 @@ impl ApplicationHandler for App {
                 #[cfg(mobile)]
                 {
                     let wanted = self.wants_text_input();
-                    if wanted != self.soft_keyboard
-                        && let Some(gfx) = self.phase.gfx_mut()
-                    {
-                        gfx.window.set_ime_allowed(wanted);
+                    if wanted != self.soft_keyboard {
+                        #[cfg(target_os = "android")]
+                        if wanted {
+                            let _ = crate::util::toggle_soft_keyboard_android();
+                        }
+                        if let Some(gfx) = self.phase.gfx_mut() {
+                            gfx.window.set_ime_allowed(wanted);
+                        }
                         self.soft_keyboard = wanted;
                     }
                 }

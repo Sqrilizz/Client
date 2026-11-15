@@ -358,6 +358,30 @@ pub(super) fn translate_player_action_777(old_id: u32, payload: &[u8]) -> Vec<Ve
     vec![out]
 }
 
+pub(super) fn translate_sign_update_777(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let Some(()) = advance(&mut cur, 8) else {
+        return Vec::new();
+    };
+    let is_front_text = match advance(&mut cur, 1) {
+        Some(()) => payload[8] != 0,
+        None => return Vec::new(),
+    };
+    let lines_start = cur.position() as usize;
+    for _ in 0..4 {
+        if skip_utf(&mut cur).is_none() {
+            return Vec::new();
+        }
+    }
+    let lines_end = cur.position() as usize;
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(&payload[..8]);
+    out.extend_from_slice(&payload[lines_start..lines_end]);
+    wire::write_varint(&mut out, u32::from(is_front_text));
+    vec![out]
+}
+
 /// Rewrites `player_chat` from 26.3, whose `PARTIALLY_FILTERED` mask moved
 /// to `ByteBufCodecs.BIT_SET` (`FilterMask`); everything around it copies
 /// verbatim.

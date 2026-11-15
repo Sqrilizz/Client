@@ -110,6 +110,9 @@ impl Translation {
             {
                 return frames;
             }
+            if id == v777.sign_update_id {
+                return translate_sign_update_777(v777.sign_update_old_id, &frame[pos..]);
+            }
         }
         if let Some(v774) = &ids.v774 {
             if id == v774.attack_id {

@@ -226,29 +226,9 @@ impl TouchControls {
         layout: &TouchLayout,
         now: Instant,
     ) -> Vec<TouchOutput> {
-        let (role, out) = if !gameplay {
-            (
-                Role::Pointer,
-                vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
-            )
-        } else if let Some(button) = layout.button_at(p) {
+        let (role, out) = if let Some(button) = layout.button_at(p) {
             match button {
-                TouchButton::Jump => (Role::Jump, Vec::new()),
-                TouchButton::Primary => {
-                    if self.virtual_mouse_mode {
-                        (Role::Primary, vec![TouchOutput::PointerDown])
-                    } else {
-                        (Role::Primary, vec![TouchOutput::DestroyStart])
-                    }
-                }
-                TouchButton::Secondary => {
-                    if self.virtual_mouse_mode {
-                        (Role::Secondary, vec![TouchOutput::RightClick])
-                    } else {
-                        (Role::Secondary, vec![TouchOutput::Use])
-                    }
-                }
-                TouchButton::PlayerList => (Role::PlayerList, Vec::new()),
+                TouchButton::Keyboard => (Role::Spent, vec![TouchOutput::ToggleKeyboard]),
                 TouchButton::MouseToggle => {
                     self.virtual_mouse_mode = !self.virtual_mouse_mode;
                     if self.virtual_mouse_mode {
@@ -260,15 +240,37 @@ impl TouchControls {
                         vec![TouchOutput::PointerMove(self.virtual_cursor_pos)],
                     )
                 }
+                TouchButton::Primary if self.virtual_mouse_mode => {
+                    (Role::Primary, vec![TouchOutput::PointerDown])
+                }
+                TouchButton::Secondary if self.virtual_mouse_mode => {
+                    (Role::Secondary, vec![TouchOutput::RightClick])
+                }
+                _ if !gameplay => (
+                    Role::Pointer,
+                    vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
+                ),
+                TouchButton::Jump => (Role::Jump, Vec::new()),
+                TouchButton::Primary => (Role::Primary, vec![TouchOutput::DestroyStart]),
+                TouchButton::Secondary => (Role::Secondary, vec![TouchOutput::Use]),
+                TouchButton::PlayerList => (Role::PlayerList, Vec::new()),
                 TouchButton::Sneak => {
                     self.sneak_locked = !self.sneak_locked;
                     (Role::Spent, Vec::new())
                 }
-                TouchButton::Keyboard => (Role::Spent, vec![TouchOutput::ToggleKeyboard]),
                 other => match other.tapped_action() {
                     Some(action) => (Role::Spent, vec![TouchOutput::Tap(action)]),
                     None => (Role::Spent, Vec::new()),
                 },
+            }
+        } else if !gameplay {
+            if self.virtual_mouse_mode {
+                (Role::VirtualMouseTrack { last: p }, Vec::new())
+            } else {
+                (
+                    Role::Pointer,
+                    vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
+                )
             }
         } else if let Some(slot) = layout.hotbar_slot_at(p) {
             (Role::Spent, vec![TouchOutput::Hotbar(slot)])

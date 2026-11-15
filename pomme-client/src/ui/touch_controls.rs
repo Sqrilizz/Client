@@ -16,15 +16,33 @@ pub fn build_touch_controls(
     elements: &mut Vec<MenuElement>,
     layout: &TouchLayout,
     touch: &TouchControls,
+    menu_mode: bool,
 ) {
     let gs = layout.gs;
-    let radius = STICK_RADIUS * gs;
-    let base = touch.stick_origin().unwrap_or_else(|| layout.stick_home());
-    push_circle(elements, base, radius, BASE);
-    let deflection = touch.stick().map_or(Vec2::ZERO, |v| Vec2::new(v.x, -v.y));
-    push_circle(elements, base + deflection * radius, radius * 0.45, KNOB);
+    if !menu_mode {
+        let radius = STICK_RADIUS * gs;
+        let base = touch.stick_origin().unwrap_or_else(|| layout.stick_home());
+        push_circle(elements, base, radius, BASE);
+        let deflection = touch.stick().map_or(Vec2::ZERO, |v| Vec2::new(v.x, -v.y));
+        push_circle(elements, base + deflection * radius, radius * 0.45, KNOB);
+    }
 
-    for button in TouchButton::ALL {
+    let buttons: &[TouchButton] = if menu_mode {
+        if touch.is_virtual_mouse_mode() {
+            &[
+                TouchButton::Keyboard,
+                TouchButton::MouseToggle,
+                TouchButton::Primary,
+                TouchButton::Secondary,
+            ]
+        } else {
+            &[TouchButton::Keyboard, TouchButton::MouseToggle]
+        }
+    } else {
+        &TouchButton::ALL
+    };
+
+    for &button in buttons {
         let centre = layout.button_centre(button);
         let color = if (button == TouchButton::Sneak && touch.is_sneak_locked())
             || (button == TouchButton::MouseToggle && touch.is_virtual_mouse_mode())
