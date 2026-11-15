@@ -3648,6 +3648,33 @@ pub fn update_game(
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        #[cfg(mobile)]
+        {
+            let fps = gfx.fps_counter.display_fps();
+            let text = format!("{fps} FPS");
+            let fs = crate::ui::common::FONT_SIZE * gs * 0.9;
+            let tw = gfx.renderer.menu_text_width(&text, fs);
+            let cx = sw / 2.0;
+            let cy = 8.0 * gs;
+            let pad_x = 4.0 * gs;
+            let pad_y = 2.0 * gs;
+            elements.push(MenuElement::Rect {
+                x: cx - tw / 2.0 - pad_x,
+                y: cy - pad_y,
+                w: tw + pad_x * 2.0,
+                h: fs + pad_y * 2.0,
+                corner_radius: 2.0 * gs,
+                color: [0.0, 0.0, 0.0, 0.40],
+            });
+            elements.push(MenuElement::Text {
+                x: cx,
+                y: cy,
+                text,
+                scale: fs,
+                color: crate::ui::common::WHITE,
+                centered: true,
+            });
+        }
         if core.input.touch().seen() && game.world_has_pointer() {
             let layout = input::touch::TouchLayout {
                 width: sw,

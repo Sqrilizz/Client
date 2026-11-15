@@ -406,6 +406,10 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::OpenCommands);
                 }
+                if self.action_just_pressed(Action::ToggleOverlay) {
+                    game.show_debug = !game.show_debug;
+                    self.recent_actions.remove(&Action::ToggleOverlay);
+                }
             }
 
             app

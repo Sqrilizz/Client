@@ -12,7 +12,12 @@ const STILL_SLOP: f32 = 4.0;
 pub const STICK_RADIUS: f32 = 30.0;
 const LOOK_SCALE: f32 = 2.5;
 const STICK_ZONE: f32 = 0.4;
-pub const BUTTON_RADIUS: f32 = 14.0;
+pub const BUTTON_RADIUS: f32 = 20.0;
+pub const DPAD_RADIUS: f32 = 24.0;
+pub const DPAD_CENTER_RADIUS: f32 = 18.0;
+pub const JUMP_RADIUS: f32 = 30.0;
+pub const ACTION_RADIUS: f32 = 24.0;
+pub const TOP_BUTTON_RADIUS: f32 = 18.0;
 
 #[derive(Clone, Copy)]
 pub struct TouchLayout {
@@ -23,6 +28,11 @@ pub struct TouchLayout {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchButton {
+    Forward,
+    Backward,
+    Left,
+    Right,
+    DpadCenter,
     Jump,
     Chat,
     Inventory,
@@ -38,7 +48,12 @@ pub enum TouchButton {
 }
 
 impl TouchButton {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 17] = [
+        Self::Forward,
+        Self::Backward,
+        Self::Left,
+        Self::Right,
+        Self::DpadCenter,
         Self::Jump,
         Self::Chat,
         Self::Inventory,
@@ -55,6 +70,11 @@ impl TouchButton {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Forward => "^",
+            Self::Backward => "v",
+            Self::Left => "<",
+            Self::Right => ">",
+            Self::DpadCenter => "o",
             Self::Jump => "Jump",
             Self::Chat => "Chat",
             Self::Inventory => "Inv",
@@ -72,6 +92,11 @@ impl TouchButton {
 
     fn tapped_action(self) -> Option<Action> {
         match self {
+            Self::Forward => None,
+            Self::Backward => None,
+            Self::Left => None,
+            Self::Right => None,
+            Self::DpadCenter => None,
             Self::Jump => None,
             Self::Chat => Some(Action::OpenChat),
             Self::Inventory => Some(Action::ToggleInventory),
@@ -89,33 +114,77 @@ impl TouchButton {
 }
 
 impl TouchLayout {
+    pub fn dpad_home(&self) -> Vec2 {
+        let inset = 70.0 * self.gs;
+        Vec2::new(inset, self.height - inset)
+    }
+
+    pub fn dpad_step(&self) -> f32 {
+        32.0 * self.gs
+    }
+
+    pub fn button_radius(&self, button: TouchButton) -> f32 {
+        let base = match button {
+            TouchButton::Forward
+            | TouchButton::Backward
+            | TouchButton::Left
+            | TouchButton::Right => DPAD_RADIUS,
+            TouchButton::DpadCenter => DPAD_CENTER_RADIUS,
+            TouchButton::Jump => JUMP_RADIUS,
+            TouchButton::Primary | TouchButton::Secondary => ACTION_RADIUS,
+            TouchButton::Sneak => BUTTON_RADIUS,
+            _ => TOP_BUTTON_RADIUS,
+        };
+        base * self.gs
+    }
+
     pub fn button_centre(&self, button: TouchButton) -> Vec2 {
-        let inset = 2.0 * BUTTON_RADIUS * self.gs;
+        let dpad_step = self.dpad_step();
+        let dpad = self.dpad_home();
+        let top_y = 26.0 * self.gs;
+        let top_step = 42.0 * self.gs;
+        let left_top_start = 45.0 * self.gs;
+        let right_top_start = self.width - 45.0 * self.gs;
+        let right_margin = 65.0 * self.gs;
+        let bottom_margin = 70.0 * self.gs;
         match button {
-            TouchButton::Jump => Vec2::new(self.width - inset, self.height - 1.5 * inset),
-            TouchButton::Secondary => Vec2::new(self.width - inset, self.height - 3.0 * inset),
-            TouchButton::Primary => Vec2::new(self.width - 2.5 * inset, self.height - 2.25 * inset),
-            TouchButton::Pause => Vec2::new(self.width - inset, inset),
-            TouchButton::Inventory => Vec2::new(self.width - 2.5 * inset, inset),
-            TouchButton::Chat => Vec2::new(self.width - 4.0 * inset, inset),
-            TouchButton::Keyboard => Vec2::new(self.width - 5.5 * inset, inset),
-            TouchButton::ThirdPerson => Vec2::new(self.width - 7.0 * inset, inset),
-            TouchButton::Debug => Vec2::new(inset, inset),
-            TouchButton::PlayerList => Vec2::new(2.5 * inset, inset),
-            TouchButton::MouseToggle => Vec2::new(4.0 * inset, inset),
-            TouchButton::Sneak => Vec2::new(self.width - 4.0 * inset, self.height - 1.5 * inset),
+            TouchButton::Forward => Vec2::new(dpad.x, dpad.y - dpad_step),
+            TouchButton::Backward => Vec2::new(dpad.x, dpad.y + dpad_step),
+            TouchButton::Left => Vec2::new(dpad.x - dpad_step, dpad.y),
+            TouchButton::Right => Vec2::new(dpad.x + dpad_step, dpad.y),
+            TouchButton::DpadCenter => dpad,
+            TouchButton::Jump => Vec2::new(self.width - right_margin, self.height - bottom_margin),
+            TouchButton::Secondary => Vec2::new(
+                self.width - right_margin,
+                self.height - bottom_margin - 70.0 * self.gs,
+            ),
+            TouchButton::Primary => Vec2::new(
+                self.width - right_margin - 70.0 * self.gs,
+                self.height - bottom_margin - 35.0 * self.gs,
+            ),
+            TouchButton::Sneak => Vec2::new(
+                self.width - right_margin - 70.0 * self.gs,
+                self.height - bottom_margin - 100.0 * self.gs,
+            ),
+            TouchButton::Pause => Vec2::new(right_top_start, top_y),
+            TouchButton::Inventory => Vec2::new(right_top_start - top_step, top_y),
+            TouchButton::Chat => Vec2::new(right_top_start - 2.0 * top_step, top_y),
+            TouchButton::Keyboard => Vec2::new(right_top_start - 3.0 * top_step, top_y),
+            TouchButton::ThirdPerson => Vec2::new(right_top_start - 4.0 * top_step, top_y),
+            TouchButton::Debug => Vec2::new(left_top_start, top_y),
+            TouchButton::PlayerList => Vec2::new(left_top_start + top_step, top_y),
+            TouchButton::MouseToggle => Vec2::new(left_top_start + 2.0 * top_step, top_y),
         }
     }
 
     pub fn stick_home(&self) -> Vec2 {
-        let inset = 1.6 * STICK_RADIUS * self.gs;
-        Vec2::new(inset, self.height - inset)
+        self.dpad_home()
     }
 
     fn button_at(&self, p: Vec2) -> Option<TouchButton> {
         TouchButton::ALL
             .into_iter()
-            .find(|&b| p.distance(self.button_centre(b)) <= BUTTON_RADIUS * self.gs)
+            .find(|&b| p.distance(self.button_centre(b)) <= self.button_radius(b) * 1.15)
     }
 
     fn hotbar_slot_at(&self, p: Vec2) -> Option<u8> {
@@ -153,6 +222,10 @@ enum Role {
         destroying: bool,
     },
     Jump,
+    Forward,
+    Backward,
+    Left,
+    Right,
     Primary,
     Secondary,
     PlayerList,
@@ -250,14 +323,18 @@ impl TouchControls {
                     Role::Pointer,
                     vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
                 ),
+                TouchButton::Forward => (Role::Forward, Vec::new()),
+                TouchButton::Backward => (Role::Backward, Vec::new()),
+                TouchButton::Left => (Role::Left, Vec::new()),
+                TouchButton::Right => (Role::Right, Vec::new()),
+                TouchButton::DpadCenter | TouchButton::Sneak => {
+                    self.sneak_locked = !self.sneak_locked;
+                    (Role::Spent, Vec::new())
+                }
                 TouchButton::Jump => (Role::Jump, Vec::new()),
                 TouchButton::Primary => (Role::Primary, vec![TouchOutput::DestroyStart]),
                 TouchButton::Secondary => (Role::Secondary, vec![TouchOutput::Use]),
                 TouchButton::PlayerList => (Role::PlayerList, Vec::new()),
-                TouchButton::Sneak => {
-                    self.sneak_locked = !self.sneak_locked;
-                    (Role::Spent, Vec::new())
-                }
                 other => match other.tapped_action() {
                     Some(action) => (Role::Spent, vec![TouchOutput::Tap(action)]),
                     None => (Role::Spent, Vec::new()),
@@ -303,6 +380,18 @@ impl TouchControls {
 
     fn drag(&mut self, id: u64, p: Vec2, layout: &TouchLayout) -> Vec<TouchOutput> {
         match self.touches.get_mut(&id) {
+            Some(role @ (Role::Forward | Role::Backward | Role::Left | Role::Right)) => {
+                if let Some(button) = layout.button_at(p) {
+                    match button {
+                        TouchButton::Forward => *role = Role::Forward,
+                        TouchButton::Backward => *role = Role::Backward,
+                        TouchButton::Left => *role = Role::Left,
+                        TouchButton::Right => *role = Role::Right,
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
             Some(Role::Stick { current, .. }) => {
                 *current = p;
                 Vec::new()
@@ -390,6 +479,20 @@ impl TouchControls {
     }
 
     pub fn stick(&self) -> Option<Vec2> {
+        let mut dpad = Vec2::ZERO;
+        for role in self.touches.values() {
+            match role {
+                Role::Forward => dpad.y += 1.0,
+                Role::Backward => dpad.y -= 1.0,
+                Role::Left => dpad.x -= 1.0,
+                Role::Right => dpad.x += 1.0,
+                _ => {}
+            }
+        }
+        if dpad != Vec2::ZERO {
+            return Some(dpad.normalize_or_zero());
+        }
+
         self.touches.values().find_map(|role| match role {
             Role::Stick {
                 origin,
@@ -409,8 +512,42 @@ impl TouchControls {
         })
     }
 
+    pub fn is_forward_held(&self) -> bool {
+        self.touches
+            .values()
+            .any(|role| matches!(role, Role::Forward))
+    }
+
+    pub fn is_backward_held(&self) -> bool {
+        self.touches
+            .values()
+            .any(|role| matches!(role, Role::Backward))
+    }
+
+    pub fn is_left_held(&self) -> bool {
+        self.touches.values().any(|role| matches!(role, Role::Left))
+    }
+
+    pub fn is_right_held(&self) -> bool {
+        self.touches
+            .values()
+            .any(|role| matches!(role, Role::Right))
+    }
+
     pub fn jump_held(&self) -> bool {
         self.touches.values().any(|role| matches!(role, Role::Jump))
+    }
+
+    pub fn is_primary_held(&self) -> bool {
+        self.touches
+            .values()
+            .any(|role| matches!(role, Role::Primary))
+    }
+
+    pub fn is_secondary_held(&self) -> bool {
+        self.touches
+            .values()
+            .any(|role| matches!(role, Role::Secondary))
     }
 
     pub fn player_list_held(&self) -> bool {

@@ -1,14 +1,11 @@
 use glam::Vec2;
 
-use crate::app::input::touch::{
-    BUTTON_RADIUS, STICK_RADIUS, TouchButton, TouchControls, TouchLayout,
-};
+use crate::app::input::touch::{TouchButton, TouchControls, TouchLayout};
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::ui::common::{FONT_SIZE, WHITE};
 
 const BASE: [f32; 4] = [0.0, 0.0, 0.0, 0.40];
 const BASE_ACTIVE: [f32; 4] = [0.2, 0.4, 0.7, 0.65];
-const KNOB: [f32; 4] = [1.0, 1.0, 1.0, 0.50];
 const CURSOR_BODY: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
 const CURSOR_OUTLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
 
@@ -20,11 +17,27 @@ pub fn build_touch_controls(
 ) {
     let gs = layout.gs;
     if !menu_mode {
-        let radius = STICK_RADIUS * gs;
-        let base = touch.stick_origin().unwrap_or_else(|| layout.stick_home());
-        push_circle(elements, base, radius, BASE);
-        let deflection = touch.stick().map_or(Vec2::ZERO, |v| Vec2::new(v.x, -v.y));
-        push_circle(elements, base + deflection * radius, radius * 0.45, KNOB);
+        let dpad = layout.dpad_home();
+        let step = layout.dpad_step();
+        let radius = layout.button_radius(TouchButton::Forward);
+        let arm_len = step + radius;
+        let bar_width = 2.0 * radius;
+        elements.push(MenuElement::Rect {
+            x: dpad.x - bar_width / 2.0,
+            y: dpad.y - arm_len,
+            w: bar_width,
+            h: 2.0 * arm_len,
+            corner_radius: radius,
+            color: [0.0, 0.0, 0.0, 0.25],
+        });
+        elements.push(MenuElement::Rect {
+            x: dpad.x - arm_len,
+            y: dpad.y - bar_width / 2.0,
+            w: 2.0 * arm_len,
+            h: bar_width,
+            corner_radius: radius,
+            color: [0.0, 0.0, 0.0, 0.25],
+        });
     }
 
     let buttons: &[TouchButton] = if menu_mode {
@@ -44,19 +57,35 @@ pub fn build_touch_controls(
 
     for &button in buttons {
         let centre = layout.button_centre(button);
-        let color = if (button == TouchButton::Sneak && touch.is_sneak_locked())
-            || (button == TouchButton::MouseToggle && touch.is_virtual_mouse_mode())
-        {
-            BASE_ACTIVE
-        } else {
-            BASE
+        let radius = layout.button_radius(button);
+        let active = match button {
+            TouchButton::Sneak | TouchButton::DpadCenter => touch.is_sneak_locked(),
+            TouchButton::MouseToggle => touch.is_virtual_mouse_mode(),
+            TouchButton::Forward => touch.is_forward_held(),
+            TouchButton::Backward => touch.is_backward_held(),
+            TouchButton::Left => touch.is_left_held(),
+            TouchButton::Right => touch.is_right_held(),
+            TouchButton::Jump => touch.jump_held(),
+            TouchButton::Primary => touch.is_primary_held(),
+            TouchButton::Secondary => touch.is_secondary_held(),
+            _ => false,
         };
-        push_circle(elements, centre, BUTTON_RADIUS * gs, color);
+        let color = if active { BASE_ACTIVE } else { BASE };
+        push_circle(elements, centre, radius, color);
+        let font_scale = match button {
+            TouchButton::Forward
+            | TouchButton::Backward
+            | TouchButton::Left
+            | TouchButton::Right => FONT_SIZE * gs * 1.6,
+            TouchButton::DpadCenter => FONT_SIZE * gs * 1.3,
+            TouchButton::Jump => FONT_SIZE * gs * 1.1,
+            _ => FONT_SIZE * gs * 0.95,
+        };
         elements.push(MenuElement::Text {
             x: centre.x,
-            y: centre.y - FONT_SIZE * gs / 2.0,
+            y: centre.y - font_scale / 2.0,
             text: button.label().to_owned(),
-            scale: FONT_SIZE * gs,
+            scale: font_scale,
             color: WHITE,
             centered: true,
         });
