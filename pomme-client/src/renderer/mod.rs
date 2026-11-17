@@ -228,6 +228,8 @@ enum RenderMode<'a> {
         text_displays: &'a [pipelines::text_display::TextDisplayRenderInfo],
         signs: &'a [SignRenderInfo],
         weather: &'a [WeatherColumn],
+        world_border: Option<&'a crate::world::border::WorldBorder>,
+        world_height: (i32, i32),
         cloud_mode: CloudMode,
         render_distance: u32,
         /// How far distant terrain draws, in chunks; 0 for none.
@@ -302,6 +304,7 @@ pub struct Renderer {
     item_entity_pipeline: ItemEntityPipeline,
     held_item_pipeline: pipelines::held_item::HeldItemPipeline,
     weather_pipeline: WeatherPipeline,
+    world_border_pipeline: pipelines::world_border::WorldBorderPipeline,
     particle_pipeline: ParticlePipeline,
     cloud_pipeline: CloudPipeline,
     world_text_pipeline: WorldTextPipeline,
@@ -518,6 +521,8 @@ impl Renderer {
 
         let weather_pipeline =
             WeatherPipeline::new(&ctx.device, swapchain_state.targets(), resources, &lightmap);
+        let world_border_pipeline =
+            pipelines::world_border::WorldBorderPipeline::new(&ctx.device, swapchain_state.targets(), resources);
 
         let particle_pipeline =
             ParticlePipeline::new(&ctx.device, swapchain_state.targets(), &atlas, &lightmap);
@@ -649,6 +654,7 @@ impl Renderer {
             item_entity_pipeline,
             held_item_pipeline,
             weather_pipeline,
+            world_border_pipeline,
             particle_pipeline,
             cloud_pipeline,
             world_text_pipeline,
@@ -1172,6 +1178,8 @@ impl Renderer {
             self.held_item_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.weather_pipeline
+                .recreate_pipeline(&self.ctx.device, targets);
+            self.world_border_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
             self.particle_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1735,6 +1743,8 @@ impl Renderer {
         text_displays: &[pipelines::text_display::TextDisplayRenderInfo],
         signs: &[SignRenderInfo],
         weather: &[WeatherColumn],
+        world_border: Option<&crate::world::border::WorldBorder>,
+        world_height: (i32, i32),
         cloud_mode: CloudMode,
         render_distance: u32,
         distant_terrain: u32,
@@ -1785,6 +1795,8 @@ impl Renderer {
                 text_displays,
                 signs,
                 weather,
+                world_border,
+                world_height,
                 cloud_mode,
                 render_distance,
                 distant_terrain,
@@ -1915,6 +1927,8 @@ impl Renderer {
         self.sky_pipeline = SkyPipeline::new(device, targets, resources);
         self.weather_pipeline.destroy(device);
         self.weather_pipeline = WeatherPipeline::new(device, targets, resources, &self.lightmap);
+        self.world_border_pipeline.destroy(device);
+        self.world_border_pipeline = pipelines::world_border::WorldBorderPipeline::new(device, targets, resources);
         self.cloud_pipeline.destroy(device);
         self.cloud_pipeline = CloudPipeline::new(device, targets, resources);
         self.block_overlay_pipeline.destroy(device);
@@ -2296,6 +2310,7 @@ impl Renderer {
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
+            self.world_border_pipeline.update_camera(frame, &uniform);
             self.particle_pipeline.update_camera(frame, &uniform);
             self.world_text_pipeline.update_camera(frame, &uniform);
             self.cloud_pipeline.update_camera(frame, &uniform);
@@ -2609,6 +2624,8 @@ impl Renderer {
                 text_displays: _,
                 signs: _,
                 weather,
+                world_border,
+                world_height,
                 cloud_mode,
                 render_distance,
                 distant_terrain,
@@ -2832,6 +2849,18 @@ impl Renderer {
                         sky,
                         weather,
                     );
+
+                    if let Some(border) = world_border {
+                        self.world_border_pipeline.update_and_draw(
+                            &mut pass,
+                            frame,
+                            &self.camera,
+                            border,
+                            *render_distance as f32 * 16.0,
+                            world_height.0,
+                            world_height.1,
+                        );
+                    }
 
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(&mut pass, frame);
@@ -3485,6 +3514,7 @@ impl Drop for Renderer {
         self.item_entity_pipeline.destroy(&self.ctx.device);
         self.held_item_pipeline.destroy(&self.ctx.device);
         self.weather_pipeline.destroy(&self.ctx.device);
+        self.world_border_pipeline.destroy(&self.ctx.device);
         self.particle_pipeline.destroy(&self.ctx.device);
         self.world_text_pipeline.destroy(&self.ctx.device);
         self.cloud_pipeline.destroy(&self.ctx.device);
