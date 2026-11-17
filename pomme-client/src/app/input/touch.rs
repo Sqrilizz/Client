@@ -13,11 +13,6 @@ pub const STICK_RADIUS: f32 = 30.0;
 const LOOK_SCALE: f32 = 2.5;
 const STICK_ZONE: f32 = 0.4;
 pub const BUTTON_RADIUS: f32 = 20.0;
-pub const DPAD_RADIUS: f32 = 24.0;
-pub const DPAD_CENTER_RADIUS: f32 = 18.0;
-pub const JUMP_RADIUS: f32 = 30.0;
-pub const ACTION_RADIUS: f32 = 24.0;
-pub const TOP_BUTTON_RADIUS: f32 = 18.0;
 
 #[derive(Clone, Copy)]
 pub struct TouchLayout {
@@ -75,18 +70,18 @@ impl TouchButton {
             Self::Left => "<",
             Self::Right => ">",
             Self::DpadCenter => "o",
-            Self::Jump => "Jump",
-            Self::Chat => "Chat",
-            Self::Inventory => "Inv",
+            Self::Jump => "JUMP",
+            Self::Chat => "CHAT",
+            Self::Inventory => "INV",
             Self::Pause => "| |",
-            Self::Keyboard => "Kbd",
+            Self::Keyboard => "KBD",
             Self::Debug => "F3",
             Self::ThirdPerson => "F5",
-            Self::PlayerList => "Tab",
-            Self::Sneak => "Snk",
+            Self::PlayerList => "TAB",
+            Self::Sneak => "SNK",
             Self::Primary => "PRI",
             Self::Secondary => "SEC",
-            Self::MouseToggle => "Mouse",
+            Self::MouseToggle => "MOUSE",
         }
     }
 
@@ -114,67 +109,86 @@ impl TouchButton {
 }
 
 impl TouchLayout {
+    pub fn dpad_cell(&self) -> f32 {
+        38.0 * self.gs
+    }
+
     pub fn dpad_home(&self) -> Vec2 {
-        let inset = 70.0 * self.gs;
-        Vec2::new(inset, self.height - inset)
+        let cell = self.dpad_cell();
+        let margin = 20.0 * self.gs;
+        Vec2::new(margin + 1.5 * cell, self.height - margin - 1.5 * cell)
     }
 
     pub fn dpad_step(&self) -> f32 {
-        32.0 * self.gs
+        self.dpad_cell()
     }
 
-    pub fn button_radius(&self, button: TouchButton) -> f32 {
-        let base = match button {
-            TouchButton::Forward
-            | TouchButton::Backward
-            | TouchButton::Left
-            | TouchButton::Right => DPAD_RADIUS,
-            TouchButton::DpadCenter => DPAD_CENTER_RADIUS,
-            TouchButton::Jump => JUMP_RADIUS,
-            TouchButton::Primary | TouchButton::Secondary => ACTION_RADIUS,
-            TouchButton::Sneak => BUTTON_RADIUS,
-            _ => TOP_BUTTON_RADIUS,
-        };
-        base * self.gs
+    pub fn button_rect(&self, button: TouchButton) -> (f32, f32, f32, f32) {
+        let gs = self.gs;
+        let dpad = self.dpad_home();
+        let cell = self.dpad_cell();
+        let top_y = 6.0 * gs;
+        let top_h = 20.0 * gs;
+        let cx = self.width / 2.0;
+        let hotbar_w = 182.0 * gs;
+        let hotbar_x = (self.width - hotbar_w) / 2.0;
+        let hotbar_y = self.height - 22.0 * gs;
+        let rm = 24.0 * gs;
+        let bm = 24.0 * gs;
+        let jump_size = 52.0 * gs;
+        let btn_w = 42.0 * gs;
+        let btn_h = 42.0 * gs;
+        let snk_size = 36.0 * gs;
+
+        match button {
+            TouchButton::Forward => (dpad.x - cell / 2.0, dpad.y - 1.5 * cell, cell, cell),
+            TouchButton::Backward => (dpad.x - cell / 2.0, dpad.y + 0.5 * cell, cell, cell),
+            TouchButton::Left => (dpad.x - 1.5 * cell, dpad.y - cell / 2.0, cell, cell),
+            TouchButton::Right => (dpad.x + 0.5 * cell, dpad.y - cell / 2.0, cell, cell),
+            TouchButton::DpadCenter => (dpad.x - cell / 2.0, dpad.y - cell / 2.0, cell, cell),
+            TouchButton::Jump => (
+                self.width - rm - jump_size,
+                self.height - bm - jump_size,
+                jump_size,
+                jump_size,
+            ),
+            TouchButton::Primary => (
+                self.width - rm - jump_size - btn_w - 12.0 * gs,
+                self.height - bm - btn_h,
+                btn_w,
+                btn_h,
+            ),
+            TouchButton::Secondary => (
+                self.width - rm - btn_w,
+                self.height - bm - jump_size - btn_h - 12.0 * gs,
+                btn_w,
+                btn_h,
+            ),
+            TouchButton::Sneak => (
+                self.width - rm - jump_size - btn_w - 12.0 * gs + (btn_w - snk_size) / 2.0,
+                self.height - bm - jump_size - btn_h - 12.0 * gs + (btn_h - snk_size) / 2.0,
+                snk_size,
+                snk_size,
+            ),
+            TouchButton::Inventory => (
+                hotbar_x + hotbar_w + 4.0 * gs,
+                hotbar_y,
+                22.0 * gs,
+                22.0 * gs,
+            ),
+            TouchButton::Pause => (cx + 28.0 * gs, top_y, 26.0 * gs, top_h),
+            TouchButton::Chat => (cx - 28.0 * gs - 28.0 * gs, top_y, 28.0 * gs, top_h),
+            TouchButton::Debug => (8.0 * gs, top_y, 28.0 * gs, top_h),
+            TouchButton::ThirdPerson => (38.0 * gs, top_y, 28.0 * gs, top_h),
+            TouchButton::PlayerList => (68.0 * gs, top_y, 32.0 * gs, top_h),
+            TouchButton::Keyboard => (102.0 * gs, top_y, 34.0 * gs, top_h),
+            TouchButton::MouseToggle => (138.0 * gs, top_y, 44.0 * gs, top_h),
+        }
     }
 
     pub fn button_centre(&self, button: TouchButton) -> Vec2 {
-        let dpad_step = self.dpad_step();
-        let dpad = self.dpad_home();
-        let top_y = 26.0 * self.gs;
-        let top_step = 42.0 * self.gs;
-        let left_top_start = 45.0 * self.gs;
-        let right_top_start = self.width - 45.0 * self.gs;
-        let right_margin = 65.0 * self.gs;
-        let bottom_margin = 70.0 * self.gs;
-        match button {
-            TouchButton::Forward => Vec2::new(dpad.x, dpad.y - dpad_step),
-            TouchButton::Backward => Vec2::new(dpad.x, dpad.y + dpad_step),
-            TouchButton::Left => Vec2::new(dpad.x - dpad_step, dpad.y),
-            TouchButton::Right => Vec2::new(dpad.x + dpad_step, dpad.y),
-            TouchButton::DpadCenter => dpad,
-            TouchButton::Jump => Vec2::new(self.width - right_margin, self.height - bottom_margin),
-            TouchButton::Secondary => Vec2::new(
-                self.width - right_margin,
-                self.height - bottom_margin - 70.0 * self.gs,
-            ),
-            TouchButton::Primary => Vec2::new(
-                self.width - right_margin - 70.0 * self.gs,
-                self.height - bottom_margin - 35.0 * self.gs,
-            ),
-            TouchButton::Sneak => Vec2::new(
-                self.width - right_margin - 70.0 * self.gs,
-                self.height - bottom_margin - 100.0 * self.gs,
-            ),
-            TouchButton::Pause => Vec2::new(right_top_start, top_y),
-            TouchButton::Inventory => Vec2::new(right_top_start - top_step, top_y),
-            TouchButton::Chat => Vec2::new(right_top_start - 2.0 * top_step, top_y),
-            TouchButton::Keyboard => Vec2::new(right_top_start - 3.0 * top_step, top_y),
-            TouchButton::ThirdPerson => Vec2::new(right_top_start - 4.0 * top_step, top_y),
-            TouchButton::Debug => Vec2::new(left_top_start, top_y),
-            TouchButton::PlayerList => Vec2::new(left_top_start + top_step, top_y),
-            TouchButton::MouseToggle => Vec2::new(left_top_start + 2.0 * top_step, top_y),
-        }
+        let (x, y, w, h) = self.button_rect(button);
+        Vec2::new(x + w / 2.0, y + h / 2.0)
     }
 
     pub fn stick_home(&self) -> Vec2 {
@@ -182,9 +196,54 @@ impl TouchLayout {
     }
 
     fn button_at(&self, p: Vec2) -> Option<TouchButton> {
-        TouchButton::ALL
-            .into_iter()
-            .find(|&b| p.distance(self.button_centre(b)) <= self.button_radius(b) * 1.15)
+        let dpad = self.dpad_home();
+        let cell = self.dpad_cell();
+        let dpad_left = dpad.x - 1.5 * cell;
+        let dpad_top = dpad.y - 1.5 * cell;
+        let dpad_size = 3.0 * cell;
+        if p.x >= dpad_left
+            && p.x <= dpad_left + dpad_size
+            && p.y >= dpad_top
+            && p.y <= dpad_top + dpad_size
+        {
+            let dx = p.x - dpad.x;
+            let dy = p.y - dpad.y;
+            if dx.abs() <= cell * 0.45 && dy.abs() <= cell * 0.45 {
+                return Some(TouchButton::DpadCenter);
+            }
+            if dy.abs() >= dx.abs() {
+                return if dy < 0.0 {
+                    Some(TouchButton::Forward)
+                } else {
+                    Some(TouchButton::Backward)
+                };
+            } else {
+                return if dx < 0.0 {
+                    Some(TouchButton::Left)
+                } else {
+                    Some(TouchButton::Right)
+                };
+            }
+        }
+
+        for &btn in &TouchButton::ALL {
+            if matches!(
+                btn,
+                TouchButton::Forward
+                    | TouchButton::Backward
+                    | TouchButton::Left
+                    | TouchButton::Right
+                    | TouchButton::DpadCenter
+            ) {
+                continue;
+            }
+            let (x, y, w, h) = self.button_rect(btn);
+            let slop = 4.0 * self.gs;
+            if p.x >= x - slop && p.x <= x + w + slop && p.y >= y - slop && p.y <= y + h + slop {
+                return Some(btn);
+            }
+        }
+        None
     }
 
     fn hotbar_slot_at(&self, p: Vec2) -> Option<u8> {

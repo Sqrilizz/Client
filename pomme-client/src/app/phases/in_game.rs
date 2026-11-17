@@ -3652,23 +3652,32 @@ pub fn update_game(
         {
             let fps = gfx.fps_counter.display_fps();
             let text = format!("{fps} FPS");
-            let fs = crate::ui::common::FONT_SIZE * gs * 0.9;
-            let tw = gfx.renderer.menu_text_width(&text, fs);
+            let fs = crate::ui::common::FONT_SIZE * gs * 0.72;
             let cx = sw / 2.0;
-            let cy = 8.0 * gs;
-            let pad_x = 4.0 * gs;
-            let pad_y = 2.0 * gs;
+            let top_y = 6.0 * gs;
+            let badge_w = 48.0 * gs;
+            let badge_h = 20.0 * gs;
+            let x = cx - badge_w / 2.0;
+            let bw = 1.0 * gs;
             elements.push(MenuElement::Rect {
-                x: cx - tw / 2.0 - pad_x,
-                y: cy - pad_y,
-                w: tw + pad_x * 2.0,
-                h: fs + pad_y * 2.0,
-                corner_radius: 2.0 * gs,
-                color: [0.0, 0.0, 0.0, 0.40],
+                x,
+                y: top_y,
+                w: badge_w,
+                h: badge_h,
+                corner_radius: 4.0 * gs,
+                color: [1.0, 1.0, 1.0, 0.22],
+            });
+            elements.push(MenuElement::Rect {
+                x: x + bw,
+                y: top_y + bw,
+                w: badge_w - 2.0 * bw,
+                h: badge_h - 2.0 * bw,
+                corner_radius: 3.0 * gs,
+                color: [0.08, 0.08, 0.08, 0.50],
             });
             elements.push(MenuElement::Text {
                 x: cx,
-                y: cy,
+                y: top_y + (badge_h - fs) / 2.0,
                 text,
                 scale: fs,
                 color: crate::ui::common::WHITE,
