@@ -1660,21 +1660,10 @@ impl AppCore {
         connection.packet_tx.send_chat(msg);
     }
 
-    /// Queues a tab-list player's entity skin: the textures the server sent,
-    /// else a session-server lookup by id.
-    fn queue_player_skin(
-        &mut self,
-        uuid: uuid::Uuid,
-        textures: Option<String>,
-        name: Option<String>,
-    ) {
-        let source = if let Some(textures) = textures {
-            PlayerSkinSource::Textures(textures)
-        } else if uuid.get_version_num() == 3 && let Some(name) = name && !name.is_empty() {
-            PlayerSkinSource::Name(name)
-        } else {
-            PlayerSkinSource::Uuid
-        };
+    fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
+        let source = textures
+            .map(PlayerSkinSource::Textures)
+            .unwrap_or(PlayerSkinSource::Uuid);
         if self.requested_player_skins.get(&uuid) == Some(&source) {
             return;
         }
@@ -1710,11 +1699,7 @@ impl AppCore {
                         self.player_faces.insert(skin.uuid, face);
                         self.player_faces_dirty = true;
                     }
-                    if skin.uuid == self.user.uuid {
-                        renderer.apply_user_skin(Some(&skin.uuid), &data);
-                    } else {
-                        renderer.update_player_entity_skin(&skin.uuid, &data);
-                    }
+                    renderer.update_player_entity_skin(&skin.uuid, &data);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load entity player skin for {}: {e}", skin.uuid)
@@ -1723,10 +1708,6 @@ impl AppCore {
         }
     }
 
-    /// Loads what the text drew last frame into the shared glyph atlas and
-    /// rebuilds it when its contents change. Player faces (spectator menu,
-    /// tab list) share the same texture binding, so they are packed alongside
-    /// while `faces_shown`.
     pub fn sync_game_dynamic_atlas(
         &mut self,
         game: &GameState,
@@ -3178,11 +3159,11 @@ impl AppCore {
                         game.item_entity_store
                             .spawn_item(id, uuid, position, velocity);
                     }
-                    if entity_type == azalea_registry::builtin::EntityKind::TextDisplay {
+                    if entity_type == pomme_registry::builtin::EntityKind::TextDisplay {
                         game.display_entity_store
                             .spawn_text_display(id, position, y_rot_deg, x_rot_deg);
                     }
-                    if entity_type == azalea_registry::builtin::EntityKind::Interaction {
+                    if entity_type == pomme_registry::builtin::EntityKind::Interaction {
                         game.display_entity_store
                             .spawn_interaction(id, position);
                     }
@@ -3712,19 +3693,11 @@ impl AppCore {
                 NetworkEvent::PlayerInfoUpdate { actions, entries } => {
                     if actions.add_player {
                         for entry in &entries {
-                            self.queue_player_skin(
-                                entry.uuid,
-                                entry.textures.clone(),
-                                Some(entry.name.clone()),
-                            );
+                            self.queue_player_skin(entry.uuid, entry.textures.clone());
                         }
                     } else {
                         for entry in entries.iter().filter(|e| e.textures.is_some()) {
-                            self.queue_player_skin(
-                                entry.uuid,
-                                entry.textures.clone(),
-                                Some(entry.name.clone()),
-                            );
+                            self.queue_player_skin(entry.uuid, entry.textures.clone());
                         }
                     }
                     game.tab_list.apply_update(&actions, &entries);

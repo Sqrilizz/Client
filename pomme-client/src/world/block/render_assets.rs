@@ -915,11 +915,12 @@ mod tint_tests {
 
 #[cfg(test)]
 mod stack_model_tests {
-    use azalea_inventory::ItemStack;
     use azalea_inventory::components::{CustomModelData, ItemModel};
-    use azalea_registry::identifier::Identifier;
+    use pomme_item::ItemStack;
+    use pomme_registry::Identifier;
 
     use super::*;
+    use crate::net::item_codec::Components;
 
     #[test]
     fn item_model_component_overrides_base_name() {

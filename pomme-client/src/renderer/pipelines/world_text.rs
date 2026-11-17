@@ -356,7 +356,9 @@ pub(crate) fn push_spans(
                     (*r, 2.0)
                 } else if let Some(sprite_atlas) = ctx.sprite_atlas
                     && let Some(r) = sprite_atlas.region_uvs(match object {
-                        InlineObject::Player { .. } => SpriteId::SteveHead,
+                        InlineObject::Player { uuid, name, .. } => SpriteId::DefaultHead(
+                            crate::player::default_skin::for_profile(*uuid, name.as_deref()) as u8,
+                        ),
                         InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
                     })
                 {

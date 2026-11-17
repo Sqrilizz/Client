@@ -4811,7 +4811,7 @@ pub fn update_game(
     let held_items = if benchmark_running {
         [None, None]
     } else {
-        let held = |stack: Option<&azalea_inventory::ItemStackData>| {
+        let held = |stack: Option<&pomme_item::ItemStackData>| {
             stack.and_then(|data| {
                 let name = crate::player::inventory::item_resource_name(data.kind);
                 (name != "air").then(|| (name, data.clone()))
