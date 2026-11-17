@@ -56,6 +56,8 @@ pub struct App {
     phase: StateSlot<AppPhase>,
     core: AppCore,
     occluded: bool,
+    /// Vanilla `FramerateLimitTracker.latestInputTime`.
+    last_input: Instant,
     /// In the background on a phone; the loop sleeps instead of polling.
     suspended: bool,
     fps_limiter: FramerateLimiter,
@@ -135,6 +137,21 @@ impl FramerateLimiter {
         }
         self.last_frame = Instant::now();
     }
+}
+
+/// Vanilla `Minecraft.disconnectFromWorld`, for a player's own disconnect, or
+/// `DeathScreen.exitToTitleScreen` with `to_title`.
+fn disconnect(
+    core: &mut AppCore,
+    gfx: Gfx,
+    panorama: Panorama,
+    connection: ConnectionHandle,
+    world: Option<World>,
+    to_title: bool,
+) -> AppPhase {
+    core.menu
+        .show_after_disconnect(to_title || world.is_some(), &core.input.key_bindings);
+    leave_world(core, gfx, panorama, connection, world, AfterSaving::Menu)
 }
 
 /// The tail of every exit from a world or server.
@@ -242,18 +259,18 @@ impl App {
         quick_play: Option<QuickPlay>,
         window_size: winit::dpi::LogicalSize<u32>,
     ) -> Self {
-        let pending_skin_uuid = Some(user.uuid);
+
         let core = AppCore::new(version, data_dirs, tokio_rt, presence, user, window_size);
         Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_play,
-                pending_skin_uuid,
                 loading: None,
             }),
             install: install::Install::new(&core, false),
             installed_window: None,
             core,
             occluded: false,
+            last_input: Instant::now(),
             suspended: true,
             #[cfg(mobile)]
             soft_keyboard: false,
@@ -388,7 +405,6 @@ impl App {
         self.phase.transition(|app| match app {
             AppPhase::Setup {
                 quick_play,
-                mut pending_skin_uuid,
                 loading: Some(loading),
             } => {
                 let Loading { boot, window, .. } = *loading;
@@ -403,7 +419,6 @@ impl App {
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_play,
-                            pending_skin_uuid,
                             loading: None,
                         };
                     }
@@ -413,15 +428,13 @@ impl App {
                     p.set_in_menu(&self.core.version);
                 }
 
-                if let Some(uuid) = pending_skin_uuid.take() {
-                    renderer.load_user_skin(
-                        &uuid,
-                        Some(&self.core.user.username),
-                        &self.core.tokio_rt,
-                    );
-                    if self.core.user.has_profile {
-                        self.core.menu.set_player_face(Some(&uuid));
-                    }
+                renderer.load_player_skin(
+                    &self.core.user,
+                    self.core.resources(),
+                    &self.core.tokio_rt,
+                );
+                if self.core.user.has_profile {
+                    self.core.menu.set_player_face(Some(&self.core.user.uuid));
                 }
 
                 self.core.apply_cursor_grab(&window, None);
@@ -509,18 +522,61 @@ impl App {
         self.phase.get().world_has_pointer()
     }
 
-    /// The effective framerate cap, or `None` for uncapped, matching vanilla
-    /// `FramerateLimitTracker`: occluded/iconified → 10, the title/menu (no
-    /// world) → 60, otherwise the Max Framerate setting (uncapped at its top).
-    fn effective_framerate_limit(&self) -> Option<u32> {
-        if self.occluded {
-            Some(10)
-        } else if !matches!(self.phase.get(), AppPhase::InGame { .. }) {
-            Some(60)
-        } else {
-            let max = self.core.menu.max_framerate;
-            (max < crate::ui::menu::MAX_FRAMERATE_UNLIMITED).then_some(max)
-        }
+    /// The effective framerate cap, or `None` for uncapped
+    /// ([`framerate_limit`]).
+    fn effective_framerate_limit(&mut self) -> Option<u32> {
+        let unfocused = self.core.unfocused_since.is_some();
+        // Vanilla `FramerateLimitTracker.getThrottleReason`: iconified, or
+        // unfocused in exclusive fullscreen. An occluded window draws for
+        // nobody either.
+        let iconified = self.occluded
+            || self.phase.gfx_mut().is_some_and(|gfx| {
+                gfx.window.is_minimized() == Some(true)
+                    || unfocused
+                        && matches!(
+                            gfx.window.fullscreen(),
+                            Some(winit::window::Fullscreen::Exclusive(_))
+                        )
+            });
+        let (in_level, benchmarking) = match self.phase.get() {
+            AppPhase::InGame { game, .. } => (true, game.chunk_load_bench.is_some()),
+            _ => (false, false),
+        };
+        // A script or a benchmark runs without input and isn't idle.
+        let attended = !(self.core.test_window || self.chunk_bench.is_some() || benchmarking);
+        let limits_afk =
+            self.core.menu.inactivity_fps_limit == crate::ui::menu::InactivityFpsLimit::Afk;
+        let idle = (attended && limits_afk).then(|| {
+            self.last_input
+                .max(self.core.input.gamepad_used_at())
+                .elapsed()
+        });
+        framerate_limit(iconified, idle, in_level, self.core.menu.max_framerate)
+    }
+}
+
+/// Vanilla `FramerateLimitTracker.getFramerateLimit`: 10 fps iconified or
+/// after ten minutes without input (`idle`, `None` where AFK doesn't limit),
+/// the Max Framerate setting capped at 30 after one minute, 60 in the menus
+/// outside a level, and otherwise the setting, `None` at its uncapped top.
+fn framerate_limit(
+    iconified: bool,
+    idle: Option<Duration>,
+    in_level: bool,
+    max_framerate: u32,
+) -> Option<u32> {
+    const AFK: Duration = Duration::from_secs(60);
+    const LONG_AFK: Duration = Duration::from_secs(600);
+
+    let idle = idle.unwrap_or_default();
+    if iconified || idle > LONG_AFK {
+        Some(10)
+    } else if idle > AFK {
+        Some(max_framerate.min(30))
+    } else if !in_level {
+        Some(60)
+    } else {
+        (max_framerate < crate::ui::menu::MAX_FRAMERATE_UNLIMITED).then_some(max_framerate)
     }
 }
 
@@ -534,7 +590,46 @@ fn is_user_input(event: &WindowEvent) -> bool {
             | WindowEvent::MouseInput { .. }
             | WindowEvent::MouseWheel { .. }
             | WindowEvent::Touch(_)
+            | WindowEvent::DroppedFile(_)
     )
+}
+
+pub(crate) fn focus_changed(core: &mut AppCore, phase: &mut AppPhase, focused: bool) {
+    let mut released = Vec::new();
+    if !focused {
+        core.menu.end_binding_capture();
+        core.input.set_binding_capture(false);
+        released = core.input.release_all();
+    }
+    core.unfocused_since = (!focused).then(Instant::now);
+    // The window manager may silently drop a cursor lock on focus change, so
+    // a quick refocus (under the pause-on-lost-focus delay) re-issues the
+    // grab.
+    core.invalidate_cursor_grab_state();
+    let (window, game) = match phase {
+        AppPhase::Setup { .. } => return,
+        AppPhase::InMenu { gfx, .. }
+        | AppPhase::Connecting { gfx, .. }
+        | AppPhase::SavingWorld { gfx, .. } => (&gfx.window, None),
+        AppPhase::InGame {
+            gfx,
+            game,
+            connection,
+            ..
+        } => {
+            // As a key-up would: F3 let go toggles the overlay or applies
+            // the game-mode switcher.
+            for code in released {
+                game.on_key_released(code, &core.input, connection);
+            }
+            (&gfx.window, Some(game))
+        }
+    };
+    if focused {
+        core.apply_cursor_grab(window, game);
+    } else {
+        core.suspend_cursor_grab(window);
+    }
 }
 
 /// The game window, born in the persisted display mode: the swapchain is
@@ -566,7 +661,13 @@ fn create_window(
         .with_visible(cfg!(mobile))
         .with_active(!core.test_window)
         .with_window_icon(window_icon);
-    if cfg!(not(mobile)) {
+    if core.test_window {
+        // In pixels, as vanilla's `--width` is, so shots are the same size at
+        // any display scale.
+        let size = core.window_size;
+        window_attrs =
+            window_attrs.with_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
+    } else if cfg!(not(mobile)) {
         window_attrs = window_attrs.with_inner_size(core.window_size);
     }
     event_loop.create_window(window_attrs).map(Arc::new)
@@ -663,7 +764,6 @@ impl ApplicationHandler for App {
         self.phase.transition(|app| match app {
             AppPhase::Setup {
                 quick_play,
-                pending_skin_uuid,
                 loading: None,
             } => {
                 // The first-run download's window, if it ran.
@@ -678,7 +778,6 @@ impl ApplicationHandler for App {
                         event_loop.exit();
                         return AppPhase::Setup {
                             quick_play,
-                            pending_skin_uuid,
                             loading: None,
                         };
                     }
@@ -708,7 +807,6 @@ impl ApplicationHandler for App {
                 };
                 AppPhase::Setup {
                     quick_play,
-                    pending_skin_uuid,
                     loading,
                 }
             }
@@ -754,10 +852,20 @@ impl ApplicationHandler for App {
             }
             return;
         }
-        // The harness drives a test window's input itself; the desktop's
-        // mouse and keys passing over it mustn't steer a script.
-        if self.core.test_window && is_user_input(&event) {
+        // The harness drives a test window's input and focus itself; the
+        // desktop's mouse, keys and focus mustn't steer a script.
+        if self.core.test_window
+            && (is_user_input(&event) || matches!(event, WindowEvent::Focused(_)))
+        {
             return;
+        }
+        // Vanilla `MouseHandler.handleAccumulatedMovement` counts the mouse
+        // moving only while the window is active.
+        if is_user_input(&event)
+            && (self.core.unfocused_since.is_none()
+                || !matches!(event, WindowEvent::CursorMoved { .. }))
+        {
+            self.last_input = Instant::now();
         }
         let binding_capture = self.core.menu.binding_capture_active()
             && self.core.unfocused_since.is_none()
@@ -871,6 +979,8 @@ impl ApplicationHandler for App {
                                     .key_bindings
                                     .matches_key(Action::Close, code)
                             {
+                                // TODO: `ConnectScreen.shouldCloseOnEsc` is
+                                // false, so Escape shouldn't leave here.
                                 leave_world(
                                     &mut self.core,
                                     gfx,
@@ -1173,31 +1283,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Focused(focused) => {
-                if !focused {
-                    self.core.menu.end_binding_capture();
-                    self.core.input.set_binding_capture(false);
-                }
-                self.core.unfocused_since = (!focused).then(Instant::now);
-                // The window manager may silently drop a cursor lock on focus
-                // change, so a quick refocus (under the pause-on-lost-focus
-                // delay) re-issues the grab.
-                self.core.invalidate_cursor_grab_state();
-                if !focused && let Some(gfx) = self.phase.gfx_mut() {
-                    self.core.suspend_cursor_grab(&gfx.window);
-                }
-                if focused {
-                    match self.phase.get_mut() {
-                        AppPhase::Setup { .. } => {}
-                        AppPhase::InMenu { gfx, .. }
-                        | AppPhase::Connecting { gfx, .. }
-                        | AppPhase::SavingWorld { gfx, .. } => {
-                            self.core.apply_cursor_grab(&gfx.window, None);
-                        }
-                        AppPhase::InGame { gfx, game, .. } => {
-                            self.core.apply_cursor_grab(&gfx.window, Some(game));
-                        }
-                    }
-                }
+                focus_changed(&mut self.core, self.phase.get_mut(), focused);
             }
 
             WindowEvent::RedrawRequested => {
@@ -1287,14 +1373,9 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            ConnectingUpdateResult::ManualDisconnect => leave_world(
-                                core,
-                                gfx,
-                                panorama,
-                                connection,
-                                world,
-                                AfterSaving::Menu,
-                            ),
+                            ConnectingUpdateResult::ManualDisconnect => {
+                                disconnect(core, gfx, panorama, connection, world, false)
+                            }
                             ConnectingUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason, &core.input.key_bindings);
 
@@ -1347,13 +1428,14 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            GameUpdateResult::ManualDisconnect => leave_world(
+                            result @ (GameUpdateResult::ManualDisconnect
+                            | GameUpdateResult::ExitToTitle) => disconnect(
                                 core,
                                 gfx,
                                 Panorama::new(),
                                 connection,
                                 world,
-                                AfterSaving::Menu,
+                                matches!(result, GameUpdateResult::ExitToTitle),
                             ),
                             GameUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason, &core.input.key_bindings);
@@ -1448,6 +1530,7 @@ impl ApplicationHandler for App {
             && self.world_has_pointer()
         {
             self.core.input.on_mouse_motion(delta);
+            self.last_input = Instant::now();
         }
     }
 
@@ -1489,5 +1572,30 @@ impl ApplicationHandler for App {
         } else {
             winit::event_loop::ControlFlow::Wait
         });
+    }
+}
+
+#[cfg(test)]
+mod framerate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn follows_vanillas_throttle_order() {
+        let secs = |s| Some(Duration::from_secs(s));
+        let unlimited = crate::ui::menu::MAX_FRAMERATE_UNLIMITED;
+
+        assert_eq!(framerate_limit(false, secs(0), true, 120), Some(120));
+        assert_eq!(framerate_limit(false, secs(0), true, unlimited), None);
+        assert_eq!(framerate_limit(false, secs(0), false, 120), Some(60));
+
+        assert_eq!(framerate_limit(false, secs(60), true, 120), Some(120));
+        assert_eq!(framerate_limit(false, secs(61), true, 120), Some(30));
+        assert_eq!(framerate_limit(false, secs(61), true, 20), Some(20));
+        assert_eq!(framerate_limit(false, secs(61), true, unlimited), Some(30));
+        assert_eq!(framerate_limit(false, secs(61), false, 120), Some(30));
+        assert_eq!(framerate_limit(false, secs(601), true, 120), Some(10));
+
+        assert_eq!(framerate_limit(true, secs(0), true, unlimited), Some(10));
+        assert_eq!(framerate_limit(false, None, true, 120), Some(120));
     }
 }

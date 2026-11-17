@@ -1,34 +1,96 @@
 //! Resolve a server address to connectable socket addresses, IPv4 first.
 //!
-//! azalea uses the single "first" resolved IP, which on a dual-stack host can
-//! be an unreachable IPv6, such as a NAT64-synthesized AAAA whose gateway
-//! doesn't route while the plain IPv4 is fine. We gather every address we can,
-//! prefer IPv4, and let the caller try them in order so a dead IPv6 doesn't
-//! blackhole the connection.
+//! The "first" resolved IP can be an unreachable IPv6 on a dual-stack host,
+//! such as a NAT64-synthesized AAAA whose gateway doesn't route while the
+//! plain IPv4 is fine. We gather every address we can, prefer IPv4, and let
+//! the caller try them in order so a dead IPv6 doesn't blackhole the
+//! connection.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use azalea_protocol::address::ServerAddr;
-use azalea_protocol::packets::ClientIntention;
-use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
-use azalea_protocol::packets::status::ClientboundStatusPacket;
-use azalea_protocol::packets::status::c_status_response::ClientboundStatusResponse;
-use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
-use azalea_protocol::resolve::{ResolveError, resolve_address};
+use hickory_resolver::config::{GOOGLE, ResolverConfig};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::{Name, RData};
+use hickory_resolver::{Resolver, TokioResolver};
+use pomme_protocol::status::{self, ClientIntent, Intention, ServerStatus, StatusPacket};
 use thiserror::Error;
 use tokio::net::TcpStream;
 
+use super::address::{DEFAULT_PORT, ServerAddr};
 use super::conn::Conn;
 
-/// Socket addresses to try in order: IPv4 first, the SRV-correct ones (derived
-/// from azalea's resolution) ahead of the system-resolver fallbacks.
+/// Why an address didn't resolve.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct ResolveError(String);
+
+impl ResolveError {
+    fn new(why: impl ToString) -> Self {
+        Self(why.to_string())
+    }
+}
+
+static RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    Resolver::builder_tokio()
+        .unwrap_or_else(|_| {
+            tracing::warn!("System DNS resolver unavailable; falling back to Google DNS.");
+            Resolver::builder_with_config(
+                ResolverConfig::udp_and_tcp(&GOOGLE),
+                TokioRuntimeProvider::new(),
+            )
+        })
+        .build()
+        .expect("DNS resolver")
+});
+
+/// Vanilla `ServerNameResolver.resolveAddress`: `server`'s address, or its SRV
+/// redirect's when it has one.
+async fn resolve_address(server: &ServerAddr) -> Result<SocketAddr, ResolveError> {
+    let redirect = srv_redirect(server).await;
+    let server = redirect.as_ref().unwrap_or(server);
+    if let Ok(ip) = server.host.parse() {
+        return Ok(SocketAddr::new(ip, server.port));
+    }
+    // As ASCII: read as UTF-8, a name with an underscore in it (an SRV
+    // target can have one) is refused.
+    let name = Name::from_ascii(&server.host).map_err(ResolveError::new)?;
+    let lookup = RESOLVER.lookup_ip(name).await.map_err(ResolveError::new)?;
+    let ip = lookup
+        .iter()
+        .next()
+        .ok_or_else(|| ResolveError::new("No A/AAAA record found"))?;
+    Ok(SocketAddr::new(ip, server.port))
+}
+
+/// Vanilla `ServerRedirectHandler`: the target of `_minecraft._tcp.<host>`'s
+/// first SRV record, asked for only on the default port.
+async fn srv_redirect(server: &ServerAddr) -> Option<ServerAddr> {
+    if server.port != DEFAULT_PORT {
+        return None;
+    }
+    let lookup = RESOLVER
+        .srv_lookup(format!("_minecraft._tcp.{}", server.host))
+        .await
+        .ok()?;
+    let RData::SRV(srv) = &lookup.answers().first()?.data else {
+        return None;
+    };
+    Some(ServerAddr {
+        host: srv.target.to_ascii(),
+        port: srv.port,
+    })
+}
+
+/// Socket addresses to try in order: IPv4 first, the SRV-correct ones ahead
+/// of the system-resolver fallbacks.
 pub async fn resolve_candidates(server: &ServerAddr) -> Result<Vec<SocketAddr>, ResolveError> {
     let mut candidates: Vec<SocketAddr> = Vec::new();
 
-    // An IP literal needs no DNS; skip azalea's resolution, whose SRV lookup
-    // runs even for literals and stalls badly on resolvers that drop the query.
+    // An IP literal needs no DNS; an SRV lookup for one stalls badly on
+    // resolvers that drop the query.
     if let Ok(ip) = server.host.parse::<IpAddr>() {
         push_with_nat64(&mut candidates, SocketAddr::new(ip, server.port));
         return Ok(candidates);
@@ -44,7 +106,7 @@ pub async fn resolve_candidates(server: &ServerAddr) -> Result<Vec<SocketAddr>, 
             tokio::net::lookup_host((server.host.as_str(), server.port)),
         ),
     );
-    let primary = primary.unwrap_or_else(|_| Err(ResolveError::from("resolution timed out")));
+    let primary = primary.unwrap_or_else(|_| Err(ResolveError::new("resolution timed out")));
     let extra: Vec<SocketAddr> = extra
         .ok()
         .and_then(Result::ok)
@@ -90,23 +152,25 @@ fn nat64_embedded_ipv4(addr: Ipv6Addr) -> Option<Ipv4Addr> {
 /// Fetch `server`'s status response, returning the still-open connection for
 /// a follow-up latency ping. Shared by the server-list ping and join-time
 /// wire-version negotiation.
-pub async fn request_status(
-    server: &ServerAddr,
-) -> Result<(ClientboundStatusResponse, Conn), String> {
-    let mut conn = connect(server, ClientIntention::Status)
+pub async fn request_status(server: &ServerAddr) -> Result<(ServerStatus, Conn), String> {
+    let mut conn = connect(server, ClientIntent::Status)
         .await
         .map_err(|e| e.to_string())?;
-    conn.write_packet(ServerboundStatusRequest {})
+    conn.writer
+        .write(&status::encode_status_request())
         .await
         .map_err(|e| format!("Status request failed: {e}"))?;
-    match conn
-        .read_packet::<ClientboundStatusPacket>()
-        .await
-        .map_err(|e| format!("Read failed: {e}"))?
-    {
-        ClientboundStatusPacket::StatusResponse(s) => Ok((s, conn)),
-        _ => Err("Unexpected packet".into()),
+    match read_status(&mut conn).await {
+        Ok(StatusPacket::Response(status)) => Ok((status, conn)),
+        Ok(StatusPacket::Pong(_)) => Err("Unexpected packet".into()),
+        Err(e) => Err(format!("Read failed: {e}")),
     }
+}
+
+/// The next status packet from the server.
+pub async fn read_status(conn: &mut Conn) -> Result<StatusPacket, String> {
+    let frame = conn.reader.read().await.map_err(|e| e.to_string())?;
+    status::read_frame(&frame).map_err(|e| e.to_string())
 }
 
 /// Opens the handshake, naming the protocol this session speaks.
@@ -114,15 +178,15 @@ pub async fn send_intention(
     conn: &mut Conn,
     host: &str,
     port: u16,
-    intention: ClientIntention,
+    intent: ClientIntent,
 ) -> std::io::Result<()> {
-    conn.write_packet(ServerboundIntention {
+    let intention = Intention {
         protocol_version: crate::version::session_protocol(),
-        hostname: host.to_owned(),
+        host: host.to_owned(),
         port,
-        intention,
-    })
-    .await
+        intent,
+    };
+    conn.writer.write(&intention.encode()).await
 }
 
 #[derive(Debug, Error)]
@@ -137,10 +201,7 @@ pub enum ConnectError {
 /// Resolve `server` and open a handshake-stage connection with the given intent
 /// to the first reachable candidate (IPv4 first), bounding each attempt by 5s.
 /// Shared by the join and ping paths.
-pub async fn connect(
-    server: &ServerAddr,
-    intention: ClientIntention,
-) -> Result<Conn, ConnectError> {
+pub async fn connect(server: &ServerAddr, intent: ClientIntent) -> Result<Conn, ConnectError> {
     let candidates = resolve_candidates(server)
         .await
         .map_err(ConnectError::Resolve)?;
@@ -152,7 +213,7 @@ pub async fn connect(
                 let _ = stream.set_nodelay(true);
                 tracing::info!("Connecting to {} (resolved: {addr})...", server.host);
                 let mut conn = Conn::from_tcp(stream);
-                send_intention(&mut conn, &server.host, server.port, intention)
+                send_intention(&mut conn, &server.host, server.port, intent)
                     .await
                     .map_err(ConnectError::Io)?;
                 return Ok(conn);

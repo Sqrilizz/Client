@@ -4,10 +4,41 @@ impl Ids769 {
     pub(super) fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
         Some(match id {
             i if i == self.player_chat_id => translate_player_chat,
-            i if i == self.update_advancements_id => translate_update_advancements,
             _ => return None,
         })
     }
+}
+
+/// Rewrites a native `set_creative_mode_slot` payload for 1.20.5 to 1.21.4,
+/// whose stack codec doesn't length-prefix each component value as 1.21.5's
+/// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC` does. Ids are already in the
+/// wire version's space (`remap_outbound` runs before encoding).
+pub(super) fn undelimit_creative_slot(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let rewrite = || {
+        let mut cur = Cursor::new(payload);
+        let mut out = Vec::with_capacity(payload.len() + 4);
+        wire::write_varint(&mut out, old_id);
+        advance(&mut cur, 2)?; // slot short
+        out.extend_from_slice(&payload[..2]);
+        if copy_varint(&mut cur, &mut out)? == 0 {
+            return Some(out);
+        }
+        copy_varint(&mut cur, &mut out)?; // item
+        let added = copy_varint(&mut cur, &mut out)?;
+        let removed = copy_varint(&mut cur, &mut out)?;
+        for _ in 0..added {
+            copy_varint(&mut cur, &mut out)?; // component type
+            let len = var_u32(&mut cur)? as usize;
+            let at = cur.position() as usize;
+            advance(&mut cur, len)?;
+            out.extend_from_slice(&payload[at..at + len]);
+        }
+        for _ in 0..removed {
+            copy_varint(&mut cur, &mut out)?;
+        }
+        Some(out)
+    };
+    rewrite().into_iter().collect()
 }
 
 /// Rewrites a native `container_click` payload for 1.21.4, which carries
@@ -88,15 +119,5 @@ pub(super) fn translate_player_chat(id: u32, payload: &[u8]) -> Option<Vec<u8>> 
     wire::write_varint(&mut out, id);
     wire::write_varint(&mut out, 0);
     out.extend_from_slice(payload);
-    Some(out)
-}
-
-/// Rewrites `update_advancements`: 1.21.5 appended a `showAdvancements`
-/// bool, true in every vanilla send path.
-pub(super) fn translate_update_advancements(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(payload.len() + 2);
-    wire::write_varint(&mut out, id);
-    out.extend_from_slice(payload);
-    out.push(1);
     Some(out)
 }

@@ -78,8 +78,8 @@ pub struct InputState {
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
-    /// A container screen (inventory, chest, creative) is open: it consumes
-    /// hotbar digits and the drop/swap keys, like vanilla screens do.
+    /// A screen (a container, the pause menu, the death screen) is open: it
+    /// consumes hotbar digits and the drop/swap keys, like vanilla screens do.
     pub menu_capture: bool,
     /// The player is a spectator: digits drive the spectator menu instead of
     /// the carried slot, and middle click is `key.spectatorHotbar`.
@@ -118,6 +118,7 @@ pub struct InputState {
     weak_rumble_effect: Option<Effect>,
     strong_rumble_effect: Option<Effect>,
     active_gamepad_id: Option<GamepadId>,
+    gamepad_used_at: std::time::Instant,
     recent_actions: HashMap<Action, bool>,
     touch_actions_down: HashSet<Action>,
     /// Touch taps' releases, held back until the presses have been read.
@@ -235,6 +236,7 @@ impl InputState {
             weak_rumble_effect: weak_effect,
             strong_rumble_effect: strong_effect,
             active_gamepad_id: None,
+            gamepad_used_at: std::time::Instant::now(),
             recent_actions: HashMap::new(),
             touch_actions_down: HashSet::new(),
             tap_releases: Vec::new(),
@@ -440,8 +442,22 @@ impl InputState {
         false
     }
 
+    /// When a gamepad button was last pressed or a stick pushed past half
+    /// way, which rules out a resting stick's drift. Pomme-only: vanilla has
+    /// no gamepad to count as input for its AFK frame limit.
+    pub fn gamepad_used_at(&self) -> std::time::Instant {
+        self.gamepad_used_at
+    }
+
     pub fn on_gamepad_event(&mut self, event: &gilrs::Event) {
         self.active_gamepad_id = Some(event.id);
+        if match event.event {
+            gilrs::EventType::ButtonPressed(..) => true,
+            gilrs::EventType::AxisChanged(_, value, _) => value.abs() > 0.5,
+            _ => false,
+        } {
+            self.gamepad_used_at = std::time::Instant::now();
+        }
 
         if let gilrs::EventType::ButtonReleased(button, _) = event.event {
             self.binding_gamepad_buttons_down
@@ -705,6 +721,18 @@ impl InputState {
         self.spectator_slot_presses.clear();
     }
 
+    /// Vanilla `Gui.setScreen`'s `KeyMapping.releaseAll`: a press made
+    /// before a screen opened was for the world and never reaches the
+    /// screen. The game ticks consume presses, so one made since the last
+    /// tick is still pending when a packet opens a screen. A mouse button
+    /// held through the screen stays released after it, as `setAll` only
+    /// puts the keyboard's keys back down.
+    pub fn screen_opened(&mut self) {
+        self.release_mouse_buttons();
+        self.clear_click_counts();
+        self.clear_just_pressed_actions();
+    }
+
     /// Digit presses queued for the spectator menu since the last tick.
     pub fn take_spectator_slot_presses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.spectator_slot_presses)
@@ -814,51 +842,84 @@ impl InputState {
             ElementState::Pressed => {
                 self.pressed.insert(code);
                 self.just_pressed.insert(code);
-                let actions = self.bound_actions(InputKey::Keyboard(code));
-                // Vanilla `handleKeybinds` visits slots in order: the last
-                // selects, and in spectator each one reaches the menu.
-                if !self.text_capture && !self.menu_capture {
-                    for slot in hotbar_slots(&actions) {
-                        self.select_hotbar(slot);
-                    }
-                }
-                let gameplay = !self.text_capture && !self.menu_capture;
-                for action in actions {
-                    match action {
-                        Action::ToggleInventory if !self.text_capture => {
-                            self.recent_actions.insert(action, true);
-                        }
-                        Action::DropItem
-                        | Action::SwapOffhand
-                        | Action::ToggleSpectatorShaderEffects
-                            if gameplay =>
-                        {
-                            self.click(action);
-                        }
-                        // Screen cancellation follows Escape's route, including
-                        // recipe-book interception, without opening pause in play.
-                        Action::OpenMenu => {
-                            self.recent_actions.insert(Action::OpenMenu, true);
-                        }
-                        Action::Close if self.menu_capture => {
-                            self.recent_actions.insert(Action::OpenMenu, true);
-                        }
-                        Action::ChangePerspective | Action::OpenChat | Action::OpenCommands => {
-                            self.recent_actions.insert(action, true);
-                        }
-                        Action::PickBlock if gameplay => self.middle_click.set(true),
-                        Action::SpectatorHotbar if !self.text_capture => {
-                            self.click_spectator_hotbar();
-                        }
-                        _ => {}
-                    }
-                }
+                self.press_bound_actions(InputKey::Keyboard(code));
             }
             ElementState::Released => {
                 if self.key_bindings.matches_key(Action::PickBlock, code) {
                     self.middle_click.set(false);
                 }
                 self.pressed.remove(&code);
+            }
+        }
+    }
+
+    /// Lets go of every held key and mouse button, as SDL does under vanilla
+    /// on losing focus; winit sends those releases only on Windows and X11.
+    /// Returns the keys let go, for the game's own release handling.
+    // TODO: held gamepad buttons stay down; SDL drops background gamepad
+    // events by default, gilrs keeps delivering them.
+    pub fn release_all(&mut self) -> Vec<KeyCode> {
+        let keys: Vec<KeyCode> = self
+            .pressed
+            .union(&self.binding_keys_down)
+            .copied()
+            .collect();
+        for &code in &keys {
+            self.on_key(code, ElementState::Released, false);
+        }
+        self.release_mouse_buttons();
+        keys
+    }
+
+    fn release_mouse_buttons(&mut self) {
+        for button in std::mem::take(&mut self.mouse_buttons_down) {
+            self.on_mouse_button(button, ElementState::Released);
+        }
+    }
+
+    /// No screen or text field is taking the input.
+    fn gameplay(&self) -> bool {
+        !self.text_capture && !self.menu_capture
+    }
+
+    /// Vanilla `KeyMapping.click` on a press of `input`, and what
+    /// `handleKeybinds` does with it.
+    fn press_bound_actions(&mut self, input: InputKey) {
+        let actions = self.bound_actions(input);
+        let gameplay = self.gameplay();
+        // Vanilla `handleKeybinds` visits slots in order: the last selects,
+        // and in spectator each one reaches the menu.
+        if gameplay {
+            for slot in hotbar_slots(&actions) {
+                self.select_hotbar(slot);
+            }
+        }
+        for action in actions {
+            match action {
+                Action::ToggleInventory if !self.text_capture => {
+                    self.recent_actions.insert(action, true);
+                }
+                Action::DropItem | Action::SwapOffhand | Action::ToggleSpectatorShaderEffects
+                    if gameplay =>
+                {
+                    self.click(action);
+                }
+                // Screen cancellation follows Escape's route, including
+                // recipe-book interception, without opening pause in play.
+                Action::OpenMenu => {
+                    self.recent_actions.insert(Action::OpenMenu, true);
+                }
+                Action::Close if self.menu_capture => {
+                    self.recent_actions.insert(Action::OpenMenu, true);
+                }
+                Action::ChangePerspective | Action::OpenChat | Action::OpenCommands => {
+                    self.recent_actions.insert(action, true);
+                }
+                Action::PickBlock if gameplay => self.middle_click.set(true),
+                Action::SpectatorHotbar if !self.text_capture => {
+                    self.click_spectator_hotbar();
+                }
+                _ => {}
             }
         }
     }
@@ -984,8 +1045,8 @@ impl InputState {
     pub fn key_mods(&self) -> crate::ui::text_edit::KeyMods {
         let state = self.modifiers.state();
         crate::ui::text_edit::KeyMods {
-            shift: state.shift_key(),
-            ctrl: state.control_key(),
+            shift: self.shift_held(),
+            ctrl: self.ctrl_held(),
             alt: state.alt_key(),
             super_key: state.super_key(),
         }
@@ -1189,13 +1250,17 @@ impl InputState {
             _ => (),
         }
 
+        // Vanilla `MouseHandler.onButton` clicks a button's mappings only
+        // with no screen open.
+        if was_pressed && self.gameplay() {
+            self.press_bound_actions(InputKey::Mouse(button));
+        }
         for action in self.bound_actions(InputKey::Mouse(button)) {
             match action {
                 Action::Destroy | Action::Use => {
                     self.recent_actions.insert(action, was_pressed);
                 }
-                Action::PickBlock => self.middle_click.set(was_pressed),
-                Action::SpectatorHotbar if was_pressed => self.click_spectator_hotbar(),
+                Action::PickBlock if !was_pressed => self.middle_click.set(false),
                 _ => {}
             }
         }
@@ -1343,6 +1408,24 @@ mod binding_capture_tests {
     }
 
     #[test]
+    fn releases_every_held_key_and_button() {
+        let mut input = InputState::released();
+        input.on_key(KeyCode::KeyW, ElementState::Pressed, false);
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        input.set_binding_capture(true);
+        input.capture_keyboard_input(KeyCode::F3, ElementState::Pressed, false);
+        input.set_binding_capture(false);
+
+        let released: HashSet<KeyCode> = input.release_all().into_iter().collect();
+        assert_eq!(released, HashSet::from([KeyCode::KeyW, KeyCode::F3]));
+        assert!(!input.key_pressed(KeyCode::KeyW));
+        assert!(!input.action_held(Action::Forward));
+        assert!(!input.left_click.held);
+        assert!(input.mouse_buttons_down.is_empty());
+        assert!(input.binding_keys_down.is_empty());
+    }
+
+    #[test]
     fn keyboard_capture_suppresses_repeats_until_release() {
         let mut input = InputState::released();
         input.set_binding_capture(true);
@@ -1419,6 +1502,22 @@ mod key_code_tests {
 #[cfg(test)]
 mod binding_lookup_tests {
     use super::*;
+
+    #[test]
+    fn a_screen_that_opens_gets_no_earlier_click() {
+        let mut input = InputState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        assert!(input.right_just_pressed());
+        input.screen_opened();
+        assert!(!input.right_just_pressed());
+        assert!(!input.consume_click(Action::Use));
+        // Let go until it is pressed again, however long it stays down.
+        assert!(!input.right_held());
+        assert!(!input.performing_action(Action::Use));
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        assert!(input.performing_action(Action::Use));
+    }
 
     #[test]
     fn configured_close_routes_captured_keys_like_escape() {
@@ -1628,6 +1727,28 @@ mod binding_lookup_tests {
         input.spectator = true;
         input.on_key(KeyCode::KeyK, ElementState::Pressed, false);
         assert!(input.consume_click(Action::SpectatorHotbar));
+    }
+
+    #[test]
+    fn a_side_button_clicks_its_bound_actions_outside_screens() {
+        let mut input = InputState::released();
+        let side = MouseButton::Back;
+        let mouse = InputKey::Mouse(side);
+        input.key_bindings.set(Action::Hotbar3, vec![mouse]);
+        input.key_bindings.set(Action::DropItem, vec![mouse]);
+        input.on_mouse_button(side, ElementState::Pressed);
+        input.on_mouse_button(side, ElementState::Released);
+        assert_eq!(input.selected_slot(), 2);
+        assert!(input.consume_click(Action::DropItem));
+        input.end_frame();
+
+        // A container screen swaps with it instead.
+        input.selected_slot = 0;
+        input.menu_capture = true;
+        input.on_mouse_button(side, ElementState::Pressed);
+        assert_eq!(input.selected_slot(), 0);
+        assert!(!input.consume_click(Action::DropItem));
+        assert_eq!(input.hotbar_key_just_pressed(), Some(2));
     }
 
     #[test]

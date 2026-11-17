@@ -2,13 +2,10 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::components::{
-    Damage, Enchantments, EquipmentSlot, Equippable, MaxDamage, Rarity,
-};
-use azalea_inventory::default_components::get_default_component;
-use azalea_inventory::item::MaxStackSizeExt;
-use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::builtin::{DataComponentKind, ItemKind};
+use azalea_inventory::components::{EquipmentSlot, Equippable};
+use pomme_item::defaults::ItemKindExt;
+use pomme_item::{ItemStack, ItemStackData};
+use pomme_registry::builtin::ItemKind;
 
 use super::common::{
     self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot, rgb,
@@ -710,7 +707,8 @@ pub fn build_creative_inventory(
     } else if let Some(hit) = &real_hit
         && let Some(kind) = hit.click
     {
-        let double = matches!(kind, ClickKind::Left) && is_double_click(state, hit.slot);
+        let double = matches!(kind, ClickKind::Left)
+            && super::container::double_click(&mut state.last_left_click, hit.slot);
         if hit.slot == SLOT_TRASH && shift {
             // Vanilla `slotClicked`: a quick-move on the destroy slot empties
             // every `inventoryMenu` slot and keeps the carried stack.
@@ -726,25 +724,19 @@ pub fn build_creative_inventory(
             if !items.is_empty() {
                 action = CreativeAction::SetSlots(items);
             }
-            state.last_left_click = None;
-        } else {
-            if matches!(kind, ClickKind::Left) {
-                state.last_left_click = Some((hit.slot, Instant::now()));
-            }
-            if let ItemStack::Present(carried) = &state.cursor_item {
-                // Carrying: start a drag on an eligible slot, else swap immediately.
-                if drag_slot_eligible(carried, inventory, hit.slot) {
-                    state.drag = Some(DragState {
-                        button: kind,
-                        slots: vec![hit.slot],
-                    });
-                } else {
-                    action = apply_slot_action(state, inventory, hit.slot, kind);
-                }
+        } else if let ItemStack::Present(carried) = &state.cursor_item {
+            // Carrying: start a drag on an eligible slot, else swap immediately.
+            if drag_slot_eligible(carried, inventory, hit.slot) {
+                state.drag = Some(DragState {
+                    button: kind,
+                    slots: vec![hit.slot],
+                });
             } else {
-                // Empty cursor: pick up / take half immediately.
                 action = apply_slot_action(state, inventory, hit.slot, kind);
             }
+        } else {
+            // Empty cursor: pick up / take half immediately.
+            action = apply_slot_action(state, inventory, hit.slot, kind);
         }
     }
 
@@ -1051,81 +1043,6 @@ struct DragPreview {
 
 const TOOLTIP_TAB_COLOR: [f32; 4] = rgb(0x5555FF);
 
-// Fixed list rather than `from_u32(0..)` so registry-ID shifts between MC
-// versions don't silently change counts.
-const TRACKED_COMPONENT_KINDS: &[DataComponentKind] = &[
-    DataComponentKind::MaxStackSize,
-    DataComponentKind::MaxDamage,
-    DataComponentKind::Damage,
-    DataComponentKind::ItemName,
-    DataComponentKind::ItemModel,
-    DataComponentKind::Lore,
-    DataComponentKind::Rarity,
-    DataComponentKind::Enchantments,
-    DataComponentKind::AttributeModifiers,
-    DataComponentKind::RepairCost,
-    DataComponentKind::EnchantmentGlintOverride,
-    DataComponentKind::Food,
-    DataComponentKind::Consumable,
-    DataComponentKind::UseRemainder,
-    DataComponentKind::UseCooldown,
-    DataComponentKind::Tool,
-    DataComponentKind::Weapon,
-    DataComponentKind::AttackRange,
-    DataComponentKind::Enchantable,
-    DataComponentKind::Equippable,
-    DataComponentKind::Repairable,
-    DataComponentKind::Glider,
-    DataComponentKind::BlocksAttacks,
-    DataComponentKind::DamageResistant,
-];
-
-pub(crate) fn total_component_count(data: &ItemStackData) -> usize {
-    TRACKED_COMPONENT_KINDS
-        .iter()
-        .filter(|&&kind| {
-            data.component_patch.has_kind(kind) || default_has_component(data.kind, kind)
-        })
-        .count()
-}
-
-fn default_has_component(item: ItemKind, kind: DataComponentKind) -> bool {
-    macro_rules! check {
-        ($($ck:ident => $t:ty),* $(,)?) => {
-            match kind {
-                $( DataComponentKind::$ck => get_default_component::<$t>(item).is_some(), )*
-                _ => false,
-            }
-        };
-    }
-    check! {
-        MaxStackSize => azalea_inventory::components::MaxStackSize,
-        MaxDamage => MaxDamage,
-        Damage => Damage,
-        ItemName => azalea_inventory::components::ItemName,
-        ItemModel => azalea_inventory::components::ItemModel,
-        Lore => azalea_inventory::components::Lore,
-        Rarity => Rarity,
-        Enchantments => Enchantments,
-        AttributeModifiers => azalea_inventory::components::AttributeModifiers,
-        RepairCost => azalea_inventory::components::RepairCost,
-        EnchantmentGlintOverride => azalea_inventory::components::EnchantmentGlintOverride,
-        Food => azalea_inventory::components::Food,
-        Consumable => azalea_inventory::components::Consumable,
-        UseRemainder => azalea_inventory::components::UseRemainder,
-        UseCooldown => azalea_inventory::components::UseCooldown,
-        Tool => azalea_inventory::components::Tool,
-        Weapon => azalea_inventory::components::Weapon,
-        AttackRange => azalea_inventory::components::AttackRange,
-        Enchantable => azalea_inventory::components::Enchantable,
-        Equippable => azalea_inventory::components::Equippable,
-        Repairable => azalea_inventory::components::Repairable,
-        Glider => azalea_inventory::components::Glider,
-        BlocksAttacks => azalea_inventory::components::BlocksAttacks,
-        DamageResistant => azalea_inventory::components::DamageResistant,
-    }
-}
-
 fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
     static INDEX: OnceLock<HashMap<ItemKind, Vec<&'static str>>> = OnceLock::new();
     static EMPTY: &[&str] = &[];
@@ -1301,12 +1218,6 @@ fn stack_with_count(item: &ItemStackData, count: i32) -> ItemStack {
     }
 }
 
-const DOUBLE_CLICK_MS: u128 = 250;
-
-fn is_double_click(state: &CreativeState, slot: u16) -> bool {
-    matches!(state.last_left_click, Some((s, t)) if s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS)
-}
-
 /// Double-click gather: fill the carried stack to its max by pulling matching
 /// items from the real player inventory (partial stacks first, then full),
 /// matching vanilla `PICKUP_ALL`. Returns the drained slots.
@@ -1355,7 +1266,8 @@ fn may_place(slot_num: u16, item: &ItemStackData) -> bool {
         8 => EquipmentSlot::Feet,
         _ => return true,
     };
-    get_default_component::<Equippable>(item.kind).is_some_and(|e| e.slot == required)
+    crate::net::item_codec::default_component::<Equippable>(item.kind)
+        .is_some_and(|e| e.slot == required)
 }
 
 /// A drag can cover a slot only if the item may go there and the slot is empty

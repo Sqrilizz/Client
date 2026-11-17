@@ -12,11 +12,11 @@ pub use display::DisplayEntityStore;
 
 use std::collections::HashMap;
 
-use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
-use azalea_registry::builtin::EntityKind;
 use dimensions::EntityDimensions;
 use glam::DVec3;
+use pomme_item::ItemStack;
+use pomme_registry::builtin::EntityKind;
 
 use crate::attribute::AttributeMap;
 pub use crate::entity::components::{LookDirection, Position};
@@ -607,7 +607,7 @@ fn spring(cur: f32, on: bool, up: f32, down: f32) -> f32 {
 
 /// `AgeableMob` descendants on every supported version (Slime joined only
 /// in 26.2, so it's excluded here and special-cased where it matters).
-fn is_ageable_mob(kind: EntityKind) -> bool {
+pub fn is_ageable_mob(kind: EntityKind) -> bool {
     matches!(
         kind,
         EntityKind::Pig
@@ -738,10 +738,16 @@ pub struct LivingEntity {
     pub uuid: uuid::Uuid,
     /// `uuid` for a remote player, the key into the tab list and skin cache.
     pub player_uuid: Option<uuid::Uuid>,
+    /// A remote player's name from the tab list as it spawned (vanilla
+    /// `RemotePlayer`'s `GameProfile`), which outlives its tab list entry: a
+    /// server's NPCs leave the list right after they spawn.
+    pub profile_name: Option<String>,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub prev_walk_anim_speed: f32,
     pub is_baby: bool,
+    /// `AgeableMob.AGE_LOCKED`: a baby held at its age by a golden dandelion.
+    pub age_locked: bool,
     pub is_crouching: bool,
     /// Vanilla LivingEntity SLEEPING_POS metadata.
     pub sleeping_pos: Option<BlockPos>,
@@ -769,9 +775,16 @@ pub struct LivingEntity {
     pub is_creepy: bool,
     /// Zombie-family conversion (drowning / villager cure) — body-yaw shake.
     pub is_converting: bool,
-    /// Tamable (wolf/cat) state from the flags byte.
+    /// Tamable (wolf/cat) state from the flags byte; `is_tame` is also the
+    /// equine flag byte's tamed bit.
     pub is_sitting: bool,
     pub is_tame: bool,
+    /// `Ocelot.DATA_TRUSTING`.
+    pub is_trusting: bool,
+    /// `Allay.DATA_CAN_DUPLICATE`.
+    pub can_duplicate: bool,
+    /// `SnowGolem.DATA_PUMPKIN_ID`'s pumpkin bit.
+    pub has_pumpkin: bool,
     pub is_sprinting: bool,
     pub is_invisible: bool,
     pub is_glowing: bool,
@@ -889,6 +902,9 @@ pub struct LivingEntity {
     pub aggressive: bool,
     /// Mob-flags bit 0x01.
     pub no_ai: bool,
+    /// Mob-flags bit 0x02: the main hand is the left (vanilla
+    /// `Mob.isLeftHanded`).
+    pub left_handed: bool,
     /// Creeper charged/powered flag — shows the blue aura overlay.
     pub powered: bool,
     pub is_marker: bool,
@@ -994,6 +1010,17 @@ fn living_push_impulses(local: Position, remote: Position) -> Option<(DVec3, DVe
 }
 
 impl LivingEntity {
+    /// Vanilla `getScoreboardName`: the name a player spawned with, anyone
+    /// else's UUID string.
+    // TODO: vanilla doesn't spawn a player the tab list lacks; here one goes
+    // by the list's name once it has one.
+    pub fn scoreboard_name(&self, tab_list: &crate::player::tab_list::TabList) -> String {
+        match &self.profile_name {
+            Some(name) => name.clone(),
+            None => glowing::scoreboard_name(tab_list, self.uuid, self.player_uuid),
+        }
+    }
+
     /// Vanilla `LivingEntity.recreateFromPacket`: the head and body both
     /// start at the packet's head yaw, which `look_dir` carries.
     pub fn new(
@@ -1020,10 +1047,12 @@ impl LivingEntity {
             entity_type,
             uuid,
             player_uuid: (entity_type == EntityKind::Player).then_some(uuid),
+            profile_name: None,
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
             prev_walk_anim_speed: 0.0,
             is_baby: false,
+            age_locked: false,
             is_crouching: false,
             sleeping_pos: None,
             // Spawn grounded: on_ground is packet-driven and a stationary
@@ -1050,6 +1079,9 @@ impl LivingEntity {
             is_converting: false,
             is_sitting: false,
             is_tame: false,
+            is_trusting: false,
+            can_duplicate: true,
+            has_pumpkin: true,
             is_sprinting: false,
             is_invisible: false,
             is_glowing: false,
@@ -1134,6 +1166,7 @@ impl LivingEntity {
             custom_name_visible: false,
             aggressive: false,
             no_ai: false,
+            left_handed: false,
             powered: false,
             is_marker: false,
             swing_time: 0,
@@ -1172,6 +1205,16 @@ impl LivingEntity {
 
     pub fn equipment(&self, slot: EquipmentSlot) -> Option<&ItemStack> {
         self.equipment.get(&slot)
+    }
+
+    /// Vanilla `getItemHeldByArm`: the main hand's item in the main arm.
+    pub fn item_held_by_arm(&self, right_arm: bool) -> Option<&ItemStack> {
+        let main_arm_right = !self.left_handed;
+        self.equipment(if right_arm == main_arm_right {
+            EquipmentSlot::Mainhand
+        } else {
+            EquipmentSlot::Offhand
+        })
     }
 
     /// Vanilla `getViewYRot` / `getViewXRot`: the rotation between ticks.
@@ -1727,7 +1770,7 @@ pub struct ItemEntity {
     /// Vanilla `ItemStack.getDamageValue()` — the other seed component.
     pub damage: i32,
     pub count: i32,
-    pub stack: Option<azalea_inventory::ItemStackData>,
+    pub stack: Option<pomme_item::ItemStackData>,
     pub age: u32,
     pub bob_offset: f32,
     pub is_glowing: bool,
@@ -1742,7 +1785,7 @@ struct PickupAnimation {
     item_id: u32,
     damage: i32,
     count: i32,
-    stack: Option<azalea_inventory::ItemStackData>,
+    stack: Option<pomme_item::ItemStackData>,
     start_pos: Position,
     target_pos: Position,
     bob_offset: f32,
@@ -1755,7 +1798,7 @@ pub struct PickupRenderInfo {
     pub item_id: u32,
     pub damage: i32,
     pub count: i32,
-    pub stack: Option<azalea_inventory::ItemStackData>,
+    pub stack: Option<pomme_item::ItemStackData>,
     pub position: Position,
     pub bob_offset: f32,
     pub age: u32,
@@ -1812,7 +1855,7 @@ impl ItemEntityStore {
         item_id: u32,
         damage: i32,
         count: i32,
-        stack: azalea_inventory::ItemStackData,
+        stack: pomme_item::ItemStackData,
     ) {
         if let Some(entity) = self.items.get_mut(&id) {
             entity.item_name = item_name;
@@ -2124,14 +2167,14 @@ impl EntityStore {
             (k, 12, Bool(b)) if is_boat(k) => entity.boat_sim.paddle_state[1] = b,
             (k, 13, Int(t)) if is_boat(k) => entity.boat_sim.bubble_time = t,
             (_, 9, Float(h)) => entity.health = h,
-            // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
-            // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
             (EntityKind::ArmorStand, 15, Byte(f)) => entity.is_marker = f & 0x10 != 0,
             (k, 15, Byte(f)) if k != EntityKind::Player => {
                 entity.no_ai = f & 0x01 != 0;
+                entity.left_handed = f & 0x02 != 0;
                 entity.aggressive = f & 0x04 != 0;
             }
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
+            (k, 17, Bool(b)) if is_ageable_mob(k) => entity.age_locked = b,
             // Skeleton: powder-snow stray conversion; drives the vanilla
             // `isShaking` body jitter.
             (EntityKind::Skeleton, 16, Bool(b)) => entity.is_converting = b,
@@ -2144,6 +2187,9 @@ impl EntityStore {
             // `SulfurCube.onSyncedDataUpdated` primes the fuse from MAX_FUSE.
             (EntityKind::SulfurCube, 19, Int(f)) => entity.sulfur_fuse = f,
             (EntityKind::Allay, 16, Bool(b)) => entity.allay.dancing = b,
+            (EntityKind::Allay, 17, Bool(b)) => entity.can_duplicate = b,
+            (EntityKind::SnowGolem, 16, Byte(f)) => entity.has_pumpkin = f & 0x10 != 0,
+            (EntityKind::Ocelot, 18, Bool(b)) => entity.is_trusting = b,
             (EntityKind::CopperGolem, 16, Int(w)) => {
                 entity.copper_golem.weather = w.clamp(0, 3) as u32
             }
@@ -2186,9 +2232,11 @@ impl EntityStore {
                     _ => 0,
                 }
             }
-            // Equine flags byte: bit 0x10 = eating, 0x20 = standing (rear),
-            // 0x40 = open mouth.
+            // Equine flags byte: bit 0x02 = tamed, 0x10 = eating, 0x20 =
+            // standing (rear), 0x40 = open mouth.
+            (k, 18, Byte(f)) if is_llama(k) => entity.is_tame = f & 0x02 != 0,
             (k, 18, Byte(f)) if is_equine(&k) => {
+                entity.is_tame = f & 0x02 != 0;
                 entity.is_eating = f & 0x10 != 0;
                 entity.is_standing = f & 0x20 != 0;
                 entity.is_open_mouth = f & 0x40 != 0;
@@ -2824,7 +2872,7 @@ fn probes_water(kind: &EntityKind) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use azalea_registry::builtin::ItemKind;
+    use pomme_registry::builtin::ItemKind;
 
     use super::*;
 
@@ -3280,6 +3328,24 @@ mod tests {
             10,
             None,
         );
+    }
+
+    #[test]
+    fn a_left_handed_mob_holds_its_main_hand_item_in_the_left_arm() {
+        let sword = ItemStack::new(ItemKind::IronSword, 1);
+        let shield = ItemStack::new(ItemKind::Shield, 1);
+        let mut entity = LivingEntity::new(
+            EntityKind::Skeleton,
+            Position::default(),
+            LookDirection::default(),
+            uuid::Uuid::nil(),
+        );
+        entity.set_equipment(EquipmentSlot::Mainhand, sword.clone());
+        entity.set_equipment(EquipmentSlot::Offhand, shield.clone());
+        assert_eq!(entity.item_held_by_arm(true), Some(&sword));
+        entity.left_handed = true;
+        assert_eq!(entity.item_held_by_arm(true), Some(&shield));
+        assert_eq!(entity.item_held_by_arm(false), Some(&sword));
     }
 
     #[test]

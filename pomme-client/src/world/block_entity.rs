@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use azalea_registry::builtin::BlockEntityKind;
+use glam::{Mat4, Vec3};
+use pomme_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
 use crate::chat_component::{Component, list_elements};
-use crate::position::BlockPos;
+use crate::position::{BlockPos, ChunkPos};
 use crate::world::block::BlockStateData;
 
 #[derive(Clone)]
@@ -42,6 +43,14 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
     }
 }
 
+/// Whether the block-entity pipeline draws a block of `kind`. A sign is its
+/// to draw only without a block model (assets from before 26.2): the old
+/// sign textures alone don't say so, as a resource pack can carry them onto
+/// newer assets.
+pub fn drawn_by_pipeline(kind: BlockEntityKind, has_block_model: bool) -> bool {
+    !(has_block_model && matches!(kind, BlockEntityKind::Sign | BlockEntityKind::HangingSign))
+}
+
 /// The block entity a block gets the moment it's placed, before (or without)
 /// any data from the server: [`rendered_kind`]'s, and signs, whose editor
 /// opens on the empty sign the placement made.
@@ -75,7 +84,7 @@ fn is_synthesized(kind: BlockEntityKind) -> bool {
 /// `BlockEntity` from the state the same way); a position whose block is no
 /// longer a block entity drops its stale entry.
 pub fn sync_block_entity(
-    map: &mut HashMap<BlockPos, StoredBlockEntity>,
+    map: &mut BlockEntities,
     pos: BlockPos,
     block_state_data: &BlockStateData,
 ) {
@@ -88,6 +97,59 @@ pub fn sync_block_entity(
         // A synthesized entry is also stale when the block swaps directly to a
         // different block-entity block (e.g. /setblock chest -> sign).
         map.remove(&pos);
+    }
+}
+
+/// A level's block entities by column, as vanilla `LevelChunk.blockEntities`
+/// holds them: a column loads and unloads without a pass over the rest, and
+/// a frame lists only the columns around the camera.
+#[derive(Default)]
+pub struct BlockEntities {
+    columns: HashMap<ChunkPos, HashMap<BlockPos, StoredBlockEntity>>,
+}
+
+impl BlockEntities {
+    pub fn get(&self, pos: &BlockPos) -> Option<&StoredBlockEntity> {
+        self.columns.get(&ChunkPos::containing(*pos))?.get(pos)
+    }
+
+    pub fn get_mut(&mut self, pos: &BlockPos) -> Option<&mut StoredBlockEntity> {
+        self.columns
+            .get_mut(&ChunkPos::containing(*pos))?
+            .get_mut(pos)
+    }
+
+    pub fn insert(&mut self, pos: BlockPos, entity: StoredBlockEntity) {
+        self.columns
+            .entry(ChunkPos::containing(pos))
+            .or_default()
+            .insert(pos, entity);
+    }
+
+    pub fn remove(&mut self, pos: &BlockPos) {
+        if let Some(column) = self.columns.get_mut(&ChunkPos::containing(*pos)) {
+            column.remove(pos);
+        }
+    }
+
+    pub fn remove_column(&mut self, column: ChunkPos) {
+        self.columns.remove(&column);
+    }
+
+    /// The block entities of every column within `blocks` of `center` on X
+    /// and Z: a superset of those within `blocks` of it.
+    pub fn near(
+        &self,
+        center: glam::DVec3,
+        blocks: f64,
+    ) -> impl Iterator<Item = (&BlockPos, &StoredBlockEntity)> {
+        let chunks = move |at: f64| {
+            ((at - blocks).floor() as i32 >> 4)..=((at + blocks).floor() as i32 >> 4)
+        };
+        chunks(center.x)
+            .flat_map(move |x| chunks(center.z).map(move |z| ChunkPos::new(x, z)))
+            .filter_map(|column| self.columns.get(&column))
+            .flatten()
     }
 }
 
@@ -187,8 +249,8 @@ const DYE_TEXT_COLORS: [u32; 16] = [
 
 const BLACK_DYE: usize = 15;
 
-/// Sign `WoodType` names, in the order the block-entity pipeline's
-/// `SIGN_TEXTURES` lists them.
+/// Sign `WoodType` names, in the order the block-entity pipeline lists
+/// its textures.
 pub(crate) const SIGN_WOOD_NAMES: [&str; 12] = [
     "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak",
     "bamboo", "crimson", "warped",
@@ -200,6 +262,9 @@ pub struct SignBlock {
     pub hanging: bool,
     /// `WallSignBlock` or `WallHangingSignBlock`.
     pub wall: bool,
+    /// A ceiling hanging sign's `attached`: hung by one chain pair from the
+    /// middle (`HangingSignBlock.Attachment.CEILING_MIDDLE`).
+    pub attached: bool,
     /// Index into [`SIGN_WOOD_NAMES`] (`SignBlock.getWoodType`).
     pub wood: usize,
     /// The yaw its text faces, in degrees: a wall sign's `facing.toYRot()`,
@@ -231,9 +296,44 @@ impl SignBlock {
         Some(Self {
             hanging,
             wall,
+            attached: props.get("attached") == Some("true"),
             wood,
             angle,
         })
+    }
+
+    /// `StandingSignRenderer.baseTransformation` and
+    /// `HangingSignRenderer.baseTransformation`, block-local.
+    pub fn base_transformation(self) -> Mat4 {
+        let yaw = Mat4::from_rotation_y((-self.angle).to_radians());
+        if self.hanging {
+            Mat4::from_translation(Vec3::new(0.5, 0.9375, 0.5))
+                * yaw
+                * Mat4::from_translation(Vec3::new(0.0, -0.3125, 0.0))
+        } else if self.wall {
+            Mat4::from_translation(Vec3::splat(0.5))
+                * yaw
+                * Mat4::from_translation(Vec3::new(0.0, -0.3125, -0.4375))
+        } else {
+            Mat4::from_translation(Vec3::splat(0.5)) * yaw
+        }
+    }
+
+    /// The renderers' `bodyTransformation`, from before 26.2 gave signs
+    /// block models: where the sign model goes.
+    pub fn body_transformation(self) -> Mat4 {
+        let scale = if self.hanging { 1.0 } else { 0.6666667 };
+        self.base_transformation() * Mat4::from_scale(Vec3::new(scale, -scale, -scale))
+    }
+
+    /// Which of the old renderers' models it is: `[standing, wall]`, or a
+    /// hanging sign's `[ceiling, ceiling middle, wall]`.
+    pub fn model_index(self) -> u32 {
+        match (self.hanging, self.wall) {
+            (true, true) => 2,
+            (true, false) => u32::from(self.attached),
+            (false, wall) => u32::from(wall),
+        }
     }
 
     /// `SignBlockEntity.getMaxTextLineWidth`.
@@ -361,6 +461,7 @@ mod tests {
     use simdnbt::owned::{NbtList, NbtTag};
 
     use super::*;
+    use crate::chat_component::ComponentText;
 
     #[test]
     fn native_beds_are_modeled_blocks_not_block_entities() {
@@ -459,6 +560,7 @@ mod tests {
             SignBlock {
                 hanging: false,
                 wall: false,
+                attached: false,
                 wood: 5,
                 angle: 90.0,
             }
@@ -479,14 +581,96 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_with_a_block_model_is_left_to_the_mesher() {
+        for kind in [BlockEntityKind::Sign, BlockEntityKind::HangingSign] {
+            assert!(drawn_by_pipeline(kind, false));
+            assert!(!drawn_by_pipeline(kind, true));
+        }
+        assert!(drawn_by_pipeline(BlockEntityKind::Chest, true));
+    }
+
+    #[test]
+    fn a_sign_picks_its_old_model_and_where_it_goes() {
+        let sign = |name, pairs| {
+            SignBlock::of(name, &crate::world::block::PropMap::from_pairs(pairs)).unwrap()
+        };
+        let models = [
+            ("oak_sign", vec![("rotation", "0")], 0),
+            ("oak_wall_sign", vec![("facing", "south")], 1),
+            (
+                "oak_hanging_sign",
+                vec![("rotation", "0"), ("attached", "false")],
+                0,
+            ),
+            (
+                "oak_hanging_sign",
+                vec![("rotation", "0"), ("attached", "true")],
+                1,
+            ),
+            ("oak_wall_hanging_sign", vec![("facing", "south")], 2),
+        ];
+        for (name, properties, model) in models {
+            assert_eq!(sign(name, properties).model_index(), model, "{name}");
+        }
+
+        // The model's origin, and a point one model unit up, which the
+        // renderers' flip sends down.
+        let at = |block: SignBlock, y: f32| {
+            block
+                .body_transformation()
+                .transform_point3(Vec3::new(0.0, y, 0.0))
+        };
+        let standing = sign("oak_sign", vec![("rotation", "0")]);
+        assert_eq!(at(standing, 0.0), Vec3::splat(0.5));
+        assert!((at(standing, 1.0).y - (0.5 - 0.6666667)).abs() < 1.0e-6);
+        // Facing south, a wall sign sits back against the block behind it.
+        let wall = sign("oak_wall_sign", vec![("facing", "south")]);
+        assert_eq!(at(wall, 0.0), Vec3::new(0.5, 0.1875, 0.0625));
+        let hanging = sign(
+            "oak_hanging_sign",
+            vec![("rotation", "0"), ("attached", "false")],
+        );
+        assert_eq!(at(hanging, 0.0), Vec3::new(0.5, 0.625, 0.5));
+    }
+
+    #[test]
     fn a_placed_sign_gets_an_empty_entry_until_its_data_arrives() {
         let table = crate::world::block::BlockStateTable::native();
-        let mut map = HashMap::new();
+        let mut map = BlockEntities::default();
         let pos = BlockPos::new(0, 0, 0);
         let state = table.find_state("oak_sign", &[("rotation", "0")]);
         sync_block_entity(&mut map, pos, table.block_state_data(state));
-        let entry = &map[&pos];
+        let entry = map.get(&pos).unwrap();
         assert_eq!(entry.kind, BlockEntityKind::Sign);
         assert!(entry.sign.is_some());
+    }
+
+    #[test]
+    fn block_entities_are_found_and_dropped_by_column() {
+        let entity = || StoredBlockEntity::new(BlockEntityKind::Chest, NbtCompound::default());
+        let (here, next_column, far) = (
+            BlockPos::new(-1, 70, 15),
+            BlockPos::new(0, 70, 15),
+            BlockPos::new(200, 70, 0),
+        );
+        let mut map = BlockEntities::default();
+        for pos in [here, next_column, far] {
+            map.insert(pos, entity());
+        }
+        let near = |map: &BlockEntities| {
+            let mut found: Vec<BlockPos> = map
+                .near(glam::DVec3::new(0.5, 70.0, 0.5), 64.0)
+                .map(|(pos, _)| *pos)
+                .collect();
+            found.sort_by_key(|pos| pos.x);
+            found
+        };
+        assert_eq!(near(&map), [here, next_column]);
+
+        map.remove_column(ChunkPos::containing(here));
+        assert_eq!(near(&map), [next_column]);
+        assert!(map.get(&here).is_none() && map.get(&far).is_some());
+        map.remove(&next_column);
+        assert!(near(&map).is_empty());
     }
 }

@@ -5,18 +5,18 @@
 
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_core::registry_holder::dimension_type::DimensionKindElement;
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive;
-use azalea_registry::identifier::Identifier;
 use crossbeam_channel::Sender;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::lifecycle::{self, LifecyclePacket, Login, SpawnInfo};
+use pomme_protocol::serverbound::GamePacket;
 use pomme_protocol::{Direction, PacketTable, Phase};
+use pomme_registry::identifier::Identifier;
 
 use super::chat_security::ProfileKeyServices;
 use super::handler::send_ordered;
 use super::sender::PacketSender;
 use super::{DimensionInfo, NetworkEvent};
+use crate::chat_component::ComponentText;
 use crate::world::block::model::CardinalLightType;
 
 /// Decodes a lifecycle packet other than `login`, which the game loop reads
@@ -28,8 +28,7 @@ pub(super) fn handle_raw_lifecycle_packet(
     sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
 ) -> Option<DecodeResult<()>> {
-    let read: fn(&str, &mut Reader) -> Option<DecodeResult<LifecyclePacket>> = |name, r| match name
-    {
+    let read: super::RawRead<LifecyclePacket> = |name, r| match name {
         "login" => None,
         _ => lifecycle::read(name, r),
     };
@@ -65,7 +64,8 @@ fn read_native(raw: &[u8], name: &str) -> Option<DecodeResult<LifecyclePacket>> 
     super::read_raw_packet(id, &raw[r.pos()..], lifecycle::read)
 }
 
-fn disconnect_reason(nbt: &[u8]) -> String {
+/// A disconnect reason, a text component as NBT, as plain text.
+pub(super) fn disconnect_reason(nbt: &[u8]) -> String {
     super::chat::read_component(nbt, &mut 0)
         .map(|reason| reason.plain_text())
         .unwrap_or_default()
@@ -77,7 +77,7 @@ pub(super) fn login_events(
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) {
-    spawn_events(&login.spawn, registry_holder, event_tx);
+    spawn_events(&login.spawn, true, registry_holder, event_tx);
     send_ordered(
         event_tx,
         NetworkEvent::ServerViewDistance {
@@ -132,15 +132,13 @@ fn handle(
                     keep_attribute_modifiers: data_to_keep & 1 != 0,
                 },
             );
-            spawn_events(&spawn, registry_holder, event_tx);
+            spawn_events(&spawn, false, registry_holder, event_tx);
             // Vanilla recreates the player on respawn; the server re-sends any
             // effects kept across it.
             send_ordered(event_tx, NetworkEvent::ClearMobEffects);
         }
         LifecyclePacket::KeepAlive(id) => {
-            sender.send(ServerboundGamePacket::KeepAlive(ServerboundKeepAlive {
-                id: id as u64,
-            }));
+            sender.send(GamePacket::KeepAlive { id });
         }
         // Vanilla `handlePing` pongs from the main thread, in order with the
         // other main-thread packets.
@@ -208,6 +206,7 @@ fn handle(
 /// What login and respawn share: the dimension and the game modes.
 fn spawn_events(
     spawn: &SpawnInfo,
+    login: bool,
     registry_holder: &RegistryHolder,
     event_tx: &Sender<NetworkEvent>,
 ) {
@@ -228,6 +227,7 @@ fn spawn_events(
         event_tx,
         NetworkEvent::DimensionName {
             name: spawn.dimension.clone(),
+            login,
         },
     );
     send_ordered(

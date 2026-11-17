@@ -34,7 +34,8 @@
 //!   {type, duration}`, rewritten back onto `animate`) and renumbered the rest
 //!   (wake up 0, critical hit 1, magic critical hit 2)
 //! - `update_advancements` moved each advancement's screen position out of
-//!   `DisplayInfo` to a float pair after the entry
+//!   `DisplayInfo` to a float pair after the entry; an icon whose item 26.2
+//!   lacks drops its display, so that advancement is tracked but not shown
 //! - `explode` appended a `playSound` bool
 //! - `EntityDataSerializers` appended `dye_color` (43), used only by the
 //!   cushion, whose entity type (like the poplar boats) has no native id
@@ -54,10 +55,14 @@
 //! - the `tag` slot display carries a `HolderSet` rather than a tag id, and
 //!   26.3 routes every ingredient through it (`recipe_book_add`,
 //!   `place_ghost_recipe`, `update_recipes`)
+//! - TODO: recipes, stonecutter options and fuels built on an item 26.2 doesn't
+//!   have (poplar wood, wool stairs, cushions) are dropped, and such items
+//!   leave the ingredient lists they appear in
 //! - serverbound `player_action` inserted `CHANGE_DESTROY_DIRECTION` at 1,
 //!   which pomme never sends (it only steers the server's new destroy-progress
-//!   level events, 2019/2020, which drop client-side); `sign_update` reordered
-//!   its slot field (pomme never sends it)
+//!   level events, 2019/2020, which drop client-side)
+//! - `sign_update` moved the text side from before the four lines to after
+//!   them, as a `SignTextSlot` (0 back, 1 front) where it was a boolean
 //! - `accept_teleportation` appends the accepted pose, and 26.3's
 //!   `handleMovePlayer` no longer follows it with a `move_player_pos_rot` (a
 //!   second position packet in one tick disconnects): the accept is held and
@@ -98,6 +103,11 @@
 //! - each chunk section in `level_chunk_with_light` gained a `fluidCount` short
 //!   after `nonEmptyBlockCount`
 //! - `set_time` replaced `dayTime`/`tickDayTime` with a world-clock map
+//! - an `update_advancements` display's icon was a non-empty `ItemStack`
+//!   (count, item, patch) where 26.1 sends an `ItemStackTemplate`; every
+//!   version's icon is rewritten into the template with native ids. Without an
+//!   item grammar (1.20.5 to 1.21.11), an icon with a component the patch
+//!   walker can't size drops the packet
 //! - serverbound `attack` split out of `interact`, which now always carries the
 //!   hand and a low-precision hit location; 26.2-only serverbound packets
 //!   without an equivalent (`set_game_rule`, `spectator_action`) are suppressed
@@ -186,8 +196,9 @@
 //!   1.21.5 split into splash/lingering
 //! - serverbound `set_creative_mode_slot` wrote item component values bare,
 //!   where 1.21.5 length-prefixes each one
-//!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); untranslated — see the
-//!   azalea-divergence list
+//!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); the prefixes are stripped
+//!   on the way out. A version without an item grammar keeps a creative stack's
+//!   components only when it numbers every one of them as 26.2 does
 //!
 //! 1.21.3 -> 26.2 wire changes (all of 1.21.4's plus):
 //! - `level_particles` lacks the `alwaysShow` bool 1.21.4 inserted after
@@ -355,43 +366,30 @@
 //! inserted `additional_trade_cost`; 1.21.10 and every older version with a
 //! component registry: 5, where 1.21.11 inserted `use_effects` — so even
 //! `custom_name` and `enchantments` are affected on all of them) decodes under
-//! the wrong 26.2 codec — usually a misparse that skips the packet via
-//! `skip_malformed_packet`, though a coincidentally parsable layout yields a
+//! the wrong 26.2 codec — usually a misparse that skips the packet with a
+//! warning, though a coincidentally parsable layout yields a
 //! silently wrong component. Common survival items only use earlier, unshifted
 //! components. Items nested inside component values (bundles, containers) also
 //! keep their source-version ids. On 26.3 a stack carrying one of the
 //! components whose value layout changed (`pot_decorations`, inline `trim` or
 //! `instrument`, a `teleport_randomly` consume effect) misdecodes the same
 //! way, and recipe displays keep their items in wire space.
-//!
-//! Depends on azalea diverging from 26.2: these translations are correct only
-//! because azalea encodes or decodes something differently from the reference,
-//! so fixing azalea — or replacing it with pomme's own codec — breaks the older
-//! versions unless the matching rewrite lands at the same time. Each site
-//! carries a `TODO` pointing here.
-//! - outbound `set_creative_mode_slot` leaves component values undelimited,
-//!   which is 1.21.4's layout rather than 26.2's (native sessions and the
-//!   versions with an item grammar encode it with pomme's grammar instead; see
-//!   `net::item_codec`)
 
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 
 use azalea_buf::AzBuf;
 use azalea_inventory::components::Profile;
-use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_protocol::packets::game::s_container_click::HashedStack;
-use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::Registry;
-use azalea_registry::builtin::DataComponentKind;
 use glam::DVec3;
 use pomme_protocol::codec::{DecodeResult, Reader};
 use pomme_protocol::item::ItemCodec;
+use pomme_protocol::serverbound::{GamePacket, HashedStack};
 pub use pomme_protocol::version::joinable;
 use pomme_protocol::version::{NATIVE, TRANSLATED};
 use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
 };
+use pomme_registry::Registry;
 
 use crate::recipe::MAX_SLOT_DISPLAY_DEPTH;
 
@@ -488,6 +486,8 @@ struct GameIds {
     serializer_map: &'static pomme_protocol::entity_serializers::SerializerTable,
     set_entity_data_id: u32,
     commands_id: u32,
+    update_advancements_id: u32,
+    advancements: AdvancementLayout,
     /// Names the wire-space ids the rewrites size by (command parsers,
     /// particles, slot and recipe displays).
     wire_registries: &'static RegistryTable,
@@ -651,7 +651,9 @@ struct Ids764 {
 /// Native-space dispatch ids for the frame rewrites protocol 769 needs.
 struct Ids769 {
     player_chat_id: u32,
-    update_advancements_id: u32,
+    /// Native + wire ids for the creative slot's undelimited stack.
+    creative_slot_id: u32,
+    creative_slot_old_id: u32,
     /// Native-space serverbound `chat` id and the wire version's, for the
     /// last-seen checksum strip.
     chat_id: u32,
@@ -700,7 +702,6 @@ struct Ids777 {
     respawn_id: u32,
     animate_id: u32,
     level_particles_id: u32,
-    update_advancements_id: u32,
     level_chunk_id: u32,
     light_update_id: u32,
     player_chat_id: u32,
@@ -729,8 +730,8 @@ struct Ids763 {
     tag_query_id: u32,
     add_player_old_id: u32,
     add_entity_old_id: u32,
-    /// The wire version's `player` entity type; `remap_inbound` turns it into
-    /// the native id after the frame decodes.
+    /// The wire version's `player` entity type; the entity reader turns it
+    /// into the native id after the frame decodes.
     player_entity_type: u32,
 }
 
@@ -864,6 +865,9 @@ const SMITHING_TRIM_DISPLAY: u32 = 8;
 
 mod shared;
 use shared::*;
+
+mod advancements;
+use advancements::*;
 
 mod v768;
 

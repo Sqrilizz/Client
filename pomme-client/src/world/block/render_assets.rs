@@ -4,14 +4,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use azalea_block::BlockState;
-use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    ChargedProjectiles, CustomModelData, DyedColor, FireworkExplosion, ItemModel, MapColor,
-    PotionContents,
+    CustomModelData, DyedColor, FireworkExplosion, ItemModel, MapColor, PotionContents,
 };
-use azalea_registry::Registry as AzaleaRegistry;
-use azalea_registry::builtin::{ItemKind, MobEffect, Potion};
+use pomme_item::ItemStackData;
+use pomme_item::components::ChargedProjectiles;
+use pomme_registry::Registry as AzaleaRegistry;
+use pomme_registry::builtin::{ItemKind, MobEffect, Potion};
 use serde::{Deserialize, Serialize};
+
+use crate::net::item_codec::Components;
 
 const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
@@ -347,7 +349,7 @@ impl BlockRenderAssets {
             .resolve_custom_model_key(name, stack)
             .unwrap_or_else(|| name.to_string());
         let charge = stack
-            .get_component::<ChargedProjectiles>()
+            .component::<ChargedProjectiles>()
             .filter(|c| !c.items.is_empty())
             .map(|c| {
                 let rocket = c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket);
@@ -537,6 +539,12 @@ impl<'a> BlockRenderView<'a> {
         self.assets
             .textures
             .get(self.block_state_table.block_state_data(state).id)
+    }
+
+    /// Whether the state's assets give it geometry to mesh.
+    pub(crate) fn has_block_model(self, state: BlockState) -> bool {
+        self.get_baked_model(state, None).is_some()
+            || self.get_multipart_quads(state, None).is_some()
     }
 
     /// The state's variant model as vanilla `ModelBlockRenderer` picks it for
@@ -813,8 +821,8 @@ mod load_progress_tests {
 
 #[cfg(test)]
 mod tint_tests {
-    use azalea_inventory::ItemStack;
     use azalea_inventory::components::CustomModelData;
+    use pomme_item::ItemStack;
 
     use super::*;
 

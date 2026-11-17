@@ -1,11 +1,13 @@
 use azalea_inventory::components::{
     CustomName, Damage, ItemName, MaxDamage, PartialOrFullProfile, Profile, Unbreakable,
 };
-use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::builtin::ItemKind;
-use azalea_registry::tags::items::BUNDLES;
+use pomme_item::{ItemStack, ItemStackData};
+use pomme_registry::builtin::ItemKind;
+use pomme_registry::tags::items::BUNDLES;
 
 use crate::benchmark::UploadStatus;
+use crate::chat_component::{Component, ComponentText};
+use crate::net::item_codec::Components;
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::{CooldownGroup, ItemCooldowns};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
@@ -19,9 +21,11 @@ pub const LINE_HEIGHT: i32 = 9;
 pub const BTN_H: f32 = 20.0;
 /// `Tooltip.create` splits at this width.
 pub const TOOLTIP_WRAP: f32 = 170.0;
-/// Vanilla's inactive-widget text colour, `0xA0A0A0`
+/// Vanilla `CommonColors.LIGHT_GRAY`.
+pub const LIGHT_GRAY: [f32; 4] = [0.627, 0.627, 0.627, 1.0];
+/// Vanilla's inactive-widget text colour
 /// (`AbstractWidget.WithInactiveMessage.defaultInactiveMessage`).
-pub const COL_DISABLED: [f32; 4] = [0.627, 0.627, 0.627, 1.0];
+pub const COL_DISABLED: [f32; 4] = LIGHT_GRAY;
 pub const SLOT_SIZE: f32 = 16.0;
 pub const SLOT_STRIDE: f32 = 18.0;
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
@@ -30,17 +34,64 @@ const BTN_BORDER: f32 = 3.0;
 pub type SpansWidthFn<'a> = &'a dyn Fn(&[crate::ui::text::TextSpan], f32) -> f32;
 
 /// The hover-name component: custom name, else item-name component.
-fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedText> {
-    if let Some(name) = data.get_component::<CustomName>() {
-        return Some(name.name.clone());
-    }
-    data.get_component::<ItemName>()
-        .map(|name| name.name.clone())
+fn item_hover_component(data: &ItemStackData) -> Option<Component> {
+    let name = match data.get_component::<CustomName>() {
+        Some(custom) => custom.name.clone(),
+        None => data.get_component::<ItemName>()?.name.clone(),
+    };
+    Some(crate::net::item_codec::text_component(&name))
+}
+
+/// Vanilla `Window.getGuiScaledWidth` and `getGuiScaledHeight`: `px` in GUI
+/// units, rounded up (`Window.calculateScale`).
+pub fn gui_size(px: f32, gs: f32) -> f32 {
+    (px / gs).ceil()
+}
+
+/// Vanilla `this.width / 2` in a screen, in framebuffer px.
+pub fn gui_half_width(screen_w: f32, gs: f32) -> f32 {
+    (gui_size(screen_w, gs) / 2.0).floor() * gs
+}
+
+/// Vanilla `(float)this.width / 2.0f`, unrounded.
+pub fn gui_float_half_width(screen_w: f32, gs: f32) -> f32 {
+    gui_size(screen_w, gs) * gs / 2.0
+}
+
+/// Vanilla `AbstractSelectionList.getRowLeft` for a full-width list.
+pub fn gui_row_left(screen_w: f32, row_w: f32, gs: f32) -> f32 {
+    gui_half_width(screen_w, gs) - (row_w / 2.0).floor() * gs
+}
+
+/// Vanilla `this.height / 2` in a screen, in framebuffer px.
+pub fn gui_half_height(screen_h: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) / 2.0).floor() * gs
+}
+
+/// Vanilla `this.height / 4` in a screen, in framebuffer px.
+pub fn gui_quarter_height(screen_h: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) / 4.0).floor() * gs
+}
+
+/// Vanilla `FrameLayout.alignInDimension`: an element `len` GUI px long
+/// placed `align` of the way along `px`, in framebuffer px.
+pub fn gui_aligned(px: f32, len: f32, gs: f32, align: f32) -> f32 {
+    ((gui_size(px, gs) - len) * align).floor() * gs
+}
+
+/// Vanilla `(this.width - w) / 2`, or the same along the height.
+pub fn gui_centered(px: f32, len: f32, gs: f32) -> f32 {
+    gui_aligned(px, len, gs, 0.5)
+}
+
+/// Vanilla `guiHeight() - n`, in framebuffer px.
+pub fn gui_from_bottom(screen_h: f32, n: f32, gs: f32) -> f32 {
+    (gui_size(screen_h, gs) - n) * gs
 }
 
 pub fn item_display_name(data: &ItemStackData) -> String {
     item_hover_component(data)
-        .map(|name| name.to_string())
+        .map(|name| name.plain_text())
         .unwrap_or_else(|| crate::lang::item_display_name(data.kind))
 }
 
@@ -70,7 +121,7 @@ pub fn item_display_spans(
     base_color: [f32; 4],
 ) -> Vec<crate::ui::text::TextSpan> {
     item_hover_component(data)
-        .map(|name| crate::ui::text::format_text_spans(&name, base_color))
+        .map(|name| crate::ui::text::format_component_spans(&name, base_color))
         .unwrap_or_else(|| {
             vec![crate::ui::text::TextSpan::new(
                 crate::lang::item_display_name(data.kind),
@@ -310,6 +361,29 @@ pub(crate) fn set_clipboard(text: &str) -> bool {
 /// text (`EditBox.extractWidgetRenderState` -> `graphics.textHighlight`).
 pub(crate) const FIELD_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
+/// `EditBox`'s box: its field sprite, picked by focus alone.
+pub(crate) fn push_text_field_box(
+    elements: &mut Vec<MenuElement>,
+    rect: [f32; 4],
+    scale: f32,
+    focused: bool,
+) {
+    let [x, y, w, h] = rect;
+    elements.push(MenuElement::NineSlice {
+        x,
+        y,
+        w,
+        h,
+        sprite: if focused {
+            SpriteId::WidgetTextFieldHighlighted
+        } else {
+            SpriteId::WidgetTextField
+        },
+        border: scale,
+        tint: WHITE,
+    });
+}
+
 /// Selection highlight, display text, and caret for one text-field frame
 /// (`EditBox.renderWidget`): blue block behind the shown slice, then a
 /// `bar_w`-wide caret bar in insert mode or a trailing `_` glyph otherwise.
@@ -386,9 +460,15 @@ pub(crate) fn push_field_text(
                 color: caret_color,
             });
         } else {
-            // Vanilla appends the `_` one pixel after the text (`drawX += 1`).
+            // `EditBox` appends the `_` one pixel after the text
+            // (`drawX += 1`), and at the field's start when there's none.
+            let gap = if info.append_gap && !shown.is_empty() {
+                bar_w
+            } else {
+                0.0
+            };
             elements.push(MenuElement::Text {
-                x: caret_x + bar_w,
+                x: caret_x + gap,
                 y: text_y,
                 text: "_".into(),
                 scale: fs,
@@ -636,39 +716,11 @@ impl HeadProfile {
     /// profile's id (an offline id from the name when it has no id, else
     /// nil). A `namespace:path` under `textures/`.
     pub(crate) fn asset_skin(&self) -> std::borrow::Cow<'_, str> {
-        const DEFAULT_SKINS: [&str; 18] = [
-            "minecraft:entity/player/slim/alex",
-            "minecraft:entity/player/slim/ari",
-            "minecraft:entity/player/slim/efe",
-            "minecraft:entity/player/slim/kai",
-            "minecraft:entity/player/slim/makena",
-            "minecraft:entity/player/slim/noor",
-            "minecraft:entity/player/slim/steve",
-            "minecraft:entity/player/slim/sunny",
-            "minecraft:entity/player/slim/zuri",
-            "minecraft:entity/player/wide/alex",
-            "minecraft:entity/player/wide/ari",
-            "minecraft:entity/player/wide/efe",
-            "minecraft:entity/player/wide/kai",
-            "minecraft:entity/player/wide/makena",
-            "minecraft:entity/player/wide/noor",
-            "minecraft:entity/player/wide/steve",
-            "minecraft:entity/player/wide/sunny",
-            "minecraft:entity/player/wide/zuri",
-        ];
         if let Some(texture) = &self.patch_texture {
             return texture.into();
         }
-        let id = self
-            .id
-            .or_else(|| {
-                self.name
-                    .as_deref()
-                    .map(crate::user::UserData::offline_uuid)
-            })
-            .unwrap_or_default();
-        let hash = crate::world::waypoints::java_uuid_hash(&id);
-        DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize].into()
+        use crate::player::default_skin;
+        default_skin::DEFAULT_SKINS[default_skin::for_profile(self.id, self.name.as_deref())].into()
     }
 
     /// The key an [`Self::asset_skin`] texture is held under.
@@ -911,6 +963,14 @@ pub enum WidgetLabel<'a> {
 }
 
 impl WidgetLabel<'_> {
+    #[cfg(feature = "test-harness")]
+    fn text(&self) -> String {
+        match self {
+            Self::Text(text, _) => (*text).to_owned(),
+            Self::Spans(spans) => crate::ui::text::span_text(spans),
+        }
+    }
+
     /// Plain text recoloured to the inactive text colour.
     fn disabled(self) -> Self {
         match self {
@@ -1065,6 +1125,8 @@ pub fn push_button_label(
     scroll: Option<&LabelScroll<'_>>,
 ) -> bool {
     let hovered = enabled && hit_test(cursor, [x, y, w, h]);
+    #[cfg(feature = "test-harness")]
+    crate::harness::buttons::note(&label.text(), [x, y, w, h]);
 
     let sprite = if !enabled {
         SpriteId::ButtonDisabled
@@ -1188,15 +1250,69 @@ pub struct SliderResult {
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::components::{BundleContents, Damage, MaxDamage, Unbreakable};
-    use azalea_inventory::{ItemStack, ItemStackData};
-    use azalea_registry::builtin::ItemKind;
+    use azalea_inventory::components::{Damage, MaxDamage, Unbreakable};
+    use pomme_item::components::BundleContents;
+    use pomme_item::{ItemStack, ItemStackData};
+    use pomme_registry::builtin::ItemKind;
 
     use super::{
         BUNDLE_BAR_COLOR, BUNDLE_FULL_BAR_COLOR, HeadProfile, MenuElement, item_bar,
         push_item_count, push_item_icon, push_slot_with_owner, resolve_item_cooldowns,
     };
+    use crate::net::item_codec::Components;
     use crate::player::item_cooldowns::ItemCooldowns;
+
+    #[test]
+    fn the_append_caret_follows_text_by_a_pixel_and_starts_an_empty_field() {
+        let caret_x = |shown: &str, append_gap: bool| {
+            let info = crate::ui::text_edit::TextFieldRenderInfo {
+                display_start: 0,
+                display_end: shown.len(),
+                caret_byte: shown.len(),
+                caret_visible: true,
+                selection: None,
+                insert_mode: false,
+                append_gap,
+            };
+            let mut elements = Vec::new();
+            super::push_field_text(
+                &mut elements,
+                &info,
+                shown,
+                None,
+                10.0,
+                0.0,
+                8.0,
+                1.0,
+                1.0,
+                [1.0; 4],
+                None,
+                &|t: &str| 6.0 * t.len() as f32,
+            );
+            elements.iter().find_map(|e| match e {
+                MenuElement::Text { x, text, .. } if text == "_" => Some(*x),
+                _ => None,
+            })
+        };
+        assert_eq!(caret_x("", true), Some(10.0));
+        assert_eq!(caret_x("ab", true), Some(23.0));
+        assert_eq!(caret_x("ab", false), Some(22.0));
+    }
+
+    #[test]
+    fn screen_positions_round_in_gui_units() {
+        use super::{
+            gui_aligned, gui_centered, gui_from_bottom, gui_half_width, gui_quarter_height,
+        };
+        // 1280x721 at scale 3 is 427x241 GUI px, both rounded up.
+        assert_eq!(gui_half_width(1280.0, 3.0), 213.0 * 3.0);
+        assert_eq!(gui_half_width(1281.0, 3.0), 213.0 * 3.0);
+        assert_eq!(gui_quarter_height(721.0, 3.0), 60.0 * 3.0);
+        assert_eq!(gui_centered(1281.0, 200.0, 3.0), 113.0 * 3.0);
+        assert_eq!(gui_centered(1281.0, 15.0, 3.0), 206.0 * 3.0);
+        assert_eq!(gui_aligned(721.0, 100.0, 3.0, 0.25), 35.0 * 3.0);
+        assert_eq!(gui_from_bottom(721.0, 22.0, 3.0), 219.0 * 3.0);
+    }
 
     #[test]
     fn a_cooldown_covers_its_remaining_share_from_the_bottom() {
@@ -1355,7 +1471,7 @@ mod tests {
     }
 
     fn bundle(items: Vec<ItemStack>) -> ItemStackData {
-        present(ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents { items }))
+        present(ItemStack::new(ItemKind::Bundle, 1).with(&BundleContents { items }))
     }
 
     #[test]

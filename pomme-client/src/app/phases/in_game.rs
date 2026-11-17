@@ -4,11 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_inventory::components::EquipmentSlot;
-use azalea_protocol::packets::game::{
-    ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
-};
-use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
+use pomme_protocol::serverbound::{ContainerClick, ContainerInput, GamePacket};
+use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::input::{Action, InputKey, KeyBindings};
@@ -138,11 +136,11 @@ pub struct OpenContainer {
     pub title: String,
     pub title_spans: Vec<crate::ui::text::TextSpan>,
     #[cfg(feature = "test-harness")]
-    pub menu: azalea_registry::builtin::MenuKind,
+    pub menu: pomme_registry::builtin::MenuKind,
     pub screen: ContainerScreen,
     /// Menu slots in container indices; `inv_slots()` are backed by the
     /// player inventory.
-    pub slots: Vec<azalea_inventory::ItemStack>,
+    pub slots: Vec<pomme_item::ItemStack>,
     /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
     /// lit/cook progress or the anvil repair cost. Vanilla data slots are
     /// shorts; the enchanting table uses all 10 (costs, seed, clues) with -1
@@ -239,7 +237,7 @@ pub struct GameState {
     /// container clicks; an open container keeps its own.
     pub inventory_state_id: u32,
     /// Carried (cursor) stack for container screens, driven by the server.
-    pub cursor_item: azalea_inventory::ItemStack,
+    pub cursor_item: pomme_item::ItemStack,
     /// The server-opened container screen (crafting table), if any.
     pub open_container: Option<OpenContainer>,
     /// Which container menu was open last frame (0 = survival inventory), to
@@ -285,7 +283,7 @@ pub struct GameState {
     /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
     /// `tick_tool_highlight`).
     pub tool_highlight_timer: u32,
-    pub last_tool_highlight: azalea_inventory::ItemStack,
+    pub last_tool_highlight: pomme_item::ItemStack,
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
     pub title: crate::ui::title::TitleState,
     pub scoreboard: crate::ui::hud::Scoreboard,
@@ -319,7 +317,6 @@ pub struct GameState {
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
-    pub advanced_item_tooltips: bool,
     /// F1 (vanilla `hideGui`): the HUD, chat, and overlays don't render.
     pub hide_gui: bool,
     /// A chord fired while F3 was held, so releasing F3 must not toggle the
@@ -612,7 +609,7 @@ impl GameState {
             creative_inventory_open: false,
             creative_state: crate::ui::creative_inventory::CreativeState::new(),
             inventory_state_id: 0,
-            cursor_item: azalea_inventory::ItemStack::Empty,
+            cursor_item: pomme_item::ItemStack::Empty,
             open_container: None,
             container_was_open: None,
             inv_drag: None,
@@ -641,7 +638,7 @@ impl GameState {
             server_enforces_secure_chat: false,
             waypoints: crate::world::waypoints::WaypointMap::default(),
             tool_highlight_timer: 0,
-            last_tool_highlight: azalea_inventory::ItemStack::Empty,
+            last_tool_highlight: pomme_item::ItemStack::Empty,
             action_bar: None,
             title: crate::ui::title::TitleState::default(),
             scoreboard: crate::ui::hud::Scoreboard::default(),
@@ -661,7 +658,6 @@ impl GameState {
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
-            advanced_item_tooltips: false,
             hide_gui: false,
             f3_chord_consumed: false,
             debug_overlay_pending: false,
@@ -1039,13 +1035,11 @@ impl GameState {
     /// the screen closes.
     pub fn close_sign_editor(&mut self, packet_tx: &crate::net::sender::PacketSender) {
         if let Some(editor) = self.sign_editor.take() {
-            packet_tx.send(ServerboundGamePacket::SignUpdate(
-                azalea_protocol::packets::game::s_sign_update::ServerboundSignUpdate {
-                    pos: editor.pos.into(),
-                    is_front_text: editor.is_front_text,
-                    lines: editor.messages,
-                },
-            ));
+            packet_tx.send(GamePacket::SignUpdate {
+                pos: editor.pos.into(),
+                is_front_text: editor.is_front_text,
+                lines: editor.messages,
+            });
         }
     }
 
@@ -1102,7 +1096,7 @@ impl GameState {
 
     /// The currently open menu's slots: the open container's, else the player
     /// inventory's.
-    pub fn menu_slots(&self) -> &[azalea_inventory::ItemStack] {
+    pub fn menu_slots(&self) -> &[pomme_item::ItemStack] {
         match &self.open_container {
             Some(c) => &c.slots,
             None => self.player.inventory.slots(),
@@ -1112,7 +1106,7 @@ impl GameState {
     /// Set a slot of the currently open menu. Container slots backing the
     /// player inventory mirror into it, so the hotbar and a reopened
     /// inventory stay in sync.
-    pub fn set_menu_slot(&mut self, index: usize, item: azalea_inventory::ItemStack) {
+    pub fn set_menu_slot(&mut self, index: usize, item: pomme_item::ItemStack) {
         match &mut self.open_container {
             Some(c) => {
                 let Some(s) = c.slots.get_mut(index) else {
@@ -1182,7 +1176,7 @@ impl GameState {
     pub fn close_menu(&mut self) {
         self.inventory_open = false;
         self.open_container = None;
-        self.cursor_item = azalea_inventory::ItemStack::Empty;
+        self.cursor_item = pomme_item::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
         self.bundle_selection = None;
@@ -1369,8 +1363,7 @@ impl GameState {
                 true
             }
             _ if bindings.matches(Action::DebugAdvancedTooltips, &input) => {
-                self.advanced_item_tooltips = !self.advanced_item_tooltips;
-                self.debug_feedback(if self.advanced_item_tooltips {
+                self.debug_feedback(if menu.toggle_advanced_item_tooltips(bindings) {
                     "Advanced tooltips: shown"
                 } else {
                     "Advanced tooltips: hidden"
@@ -1435,13 +1428,9 @@ impl GameState {
                         .and_then(GameMode::from_id)
                         .unwrap_or(GameMode::Creative)
                 };
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::ChangeGameMode(
-                    azalea_protocol::packets::game::s_change_game_mode::ServerboundChangeGameMode {
-                        mode: target,
-                    },
-                ));
+                connection.packet_tx.send(GamePacket::ChangeGameMode {
+                    mode: u32::from(target.to_id()),
+                });
                 true
             }
             _ if bindings.matches(Action::DebugDebugOptions, &input) => {
@@ -1518,13 +1507,9 @@ impl GameState {
             if switcher.selected != self.player.game_mode
                 && let Some(mode) = GameMode::from_id(switcher.selected)
             {
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::ChangeGameMode(
-                    azalea_protocol::packets::game::s_change_game_mode::ServerboundChangeGameMode {
-                        mode,
-                    },
-                ));
+                connection.packet_tx.send(GamePacket::ChangeGameMode {
+                    mode: u32::from(mode.to_id()),
+                });
             }
             self.f3_chord_consumed = false;
             return;
@@ -1588,17 +1573,9 @@ impl GameState {
             );
         }
 
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::ClientInformation(
-                ServerboundClientInformation {
-                    client_information: crate::net::client_information(
-                        render_distance as u8,
-                        chat_options,
-                        skin_options,
-                    ),
-                },
-            ));
+        connection.packet_tx.send(GamePacket::ClientInformation(
+            crate::net::client_information(render_distance as u8, chat_options, skin_options),
+        ));
     }
 
     /// Marks a whole column for remeshing as new content.
@@ -1619,7 +1596,9 @@ impl GameState {
     #[cfg(feature = "test-harness")]
     pub fn first_unmeshed_column(&self) -> Option<ChunkPos> {
         self.mesh_columns
-            .first_unmeshed(self.chunk_store.loaded_positions())
+            .first_unmeshed(self.chunk_store.loaded_positions(), |pos| {
+                neighbourhood_lit(&self.chunk_store, &self.light_engine, pos)
+            })
     }
 
     /// Forgets every column's scheduling state, for a new level or dispatcher.
@@ -1672,12 +1651,12 @@ impl GameState {
         if dirty.columns.is_empty() && dirty.sections.is_empty() {
             return;
         }
-        let mut bumped: Vec<ChunkPos> = Vec::new();
+        let mut bumped = HashSet::new();
         for &(x, z) in &dirty.columns {
             self.keep_column(ChunkPos::new(x, z));
-            for p in crate::world::chunk::mesh_neighborhood(ChunkPos::new(x, z)) {
-                if self.chunk_store.get_chunk(&p).is_some() && !bumped.contains(&p) {
-                    bumped.push(p);
+            for p in crate::world::chunk::column_neighborhood(ChunkPos::new(x, z)) {
+                if self.chunk_store.get_chunk(&p).is_some() {
+                    bumped.insert(p);
                 }
             }
         }
@@ -1714,13 +1693,27 @@ impl GameState {
     /// mesh and upload a column's player-edited sections on the spot so the
     /// edit shows the same frame. (Vanilla defaults to NONE/async, but
     /// pomme's async round-trip is several frames, which leaves a broken
-    /// block visibly lingering after its crack overlay completes.)
+    /// block visibly lingering after its crack overlay completes.) A section
+    /// never compiled waits for its neighbours with the async meshes.
+    // TODO: vanilla's edit lights before it compiles; here the light lands
+    // in the next `update_light` and remeshes the sections again.
     pub fn mesh_sections_edit_now(
         &mut self,
         renderer: &mut Renderer,
         col: ChunkPos,
         sections: std::ops::Range<i32>,
     ) {
+        let may_mesh_now =
+            self.mesh_columns
+                .may_mesh_edit_now(col, section_bits(sections.clone()), || {
+                    neighbourhood_lit(&self.chunk_store, &self.light_engine, col)
+                });
+        if !may_mesh_now {
+            for si in sections {
+                self.enqueue_section_edit(col, si);
+            }
+            return;
+        }
         // Older async results for these sections are rejected by the
         // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
         let mesh = self
@@ -1762,7 +1755,7 @@ impl GameState {
     pub fn drain_meshes(&mut self) -> Vec<ChunkMeshData> {
         let drain_start = std::time::Instant::now();
         let mut batch = std::mem::take(&mut self.pending_upload);
-        for mesh in self.mesh_dispatcher.drain_results() {
+        for mesh in self.mesh_dispatcher.drain_results(batch.len()) {
             // Stale meshes count too: worker time spent is worker time spent.
             if let Some(bench) = &mut self.chunk_load_bench {
                 bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
@@ -1793,16 +1786,12 @@ impl GameState {
             camera_block.y,
             camera_block.z,
         ));
-        let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
-            self.chunk_store.get_chunk(&p).is_some()
-                && self.light_engine.light_on_in_column((p.x, p.z))
-        });
         let section = (camera_block.y - self.chunk_store.min_y()) >> 4;
         let compiled = self
             .compiled
             .get(&column)
             .is_some_and(|mask| mask & section_bit(section) != 0);
-        neighbourhood_lit && compiled
+        neighbourhood_lit(&self.chunk_store, &self.light_engine, column) && compiled
     }
 
     /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
@@ -1956,15 +1945,11 @@ impl GameState {
     /// Publishes every loaded column's dirty sections to the mesh workers,
     /// re-meshing a whole column when the player's movement changes its LOD.
     /// Like vanilla, every section in render distance meshes regardless of
-    /// visibility (occlusion gates only drawing), and the queue orders the
-    /// backlog nearest-first. Runs every frame, publishing only when the work
-    /// or the camera's 8-block bucket changed.
+    /// visibility (occlusion gates only drawing), once its neighbour columns
+    /// are loaded and lit, and the queue orders the backlog nearest-first.
+    /// Runs every frame, publishing only when the work or the camera's
+    /// 8-block bucket changed.
     pub fn rescan_mesh_jobs(&mut self, chunk_detail: u32) {
-        // TODO: vanilla won't schedule a section's first compile until its
-        // 3x3 column neighbourhood is loaded and lit
-        // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
-        // we mesh against missing neighbours as air and repair the borders
-        // when their light marks the column dirty.
         let loaded: Vec<ChunkPos> = self.chunk_store.loaded_positions().collect();
         let player_chunk = self.player_chunk();
         let camera = *self.player.position;
@@ -1975,12 +1960,25 @@ impl GameState {
             section_mask(self.chunk_store.section_count()),
             |pos| crate::app::core::chunk_lod(pos, player_chunk, chunk_detail),
             |pos| dispatcher.claimed_generation(pos),
+            |pos| neighbourhood_lit(&self.chunk_store, &self.light_engine, pos),
         );
         if let Some(requests) = requests {
             self.mesh_dispatcher
                 .publish(&self.chunk_store, camera, requests);
         }
     }
+}
+
+/// Vanilla `SectionUpdateTracker.hasAllNeighbors`: every column around
+/// `column` is loaded with its light applied. `column` itself is asked too:
+/// its light arrives with the chunk in vanilla and a moment after it here.
+fn neighbourhood_lit(
+    chunk_store: &ChunkStore,
+    light_engine: &crate::world::light::LightWorker,
+    column: ChunkPos,
+) -> bool {
+    crate::world::chunk::column_neighborhood(column)
+        .all(|p| chunk_store.get_chunk(&p).is_some() && light_engine.light_on_in_column((p.x, p.z)))
 }
 
 /// The bits for several section indices.
@@ -1993,7 +1991,11 @@ pub(crate) fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
 pub enum GameUpdateResult {
     None,
     ManualDisconnect,
-    Disconnected { reason: String },
+    /// The death screen's Title Screen, which skips the server list.
+    ExitToTitle,
+    Disconnected {
+        reason: String,
+    },
 }
 
 enum ResultKind {
@@ -2170,7 +2172,7 @@ pub(crate) fn build_server_screens(
                         .key_just_pressed(winit::keyboard::KeyCode::ArrowLeft),
                 ),
                 tick,
-                advanced_tooltips: game.advanced_item_tooltips,
+                advanced_tooltips: core.menu.advanced_item_tooltips,
             },
             &|t, s| gfx.renderer.menu_text_width(t, s),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
@@ -2382,13 +2384,10 @@ fn toggle_bundle_selection(
 }
 
 fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, selected: i32) {
-    use azalea_protocol::packets::game::s_bundle_item_selected::ServerboundBundleItemSelected;
-    sender.send(ServerboundGamePacket::BundleItemSelected(
-        ServerboundBundleItemSelected {
-            slot_id: i32::from(slot),
-            selected_item_index: selected as u32,
-        },
-    ));
+    sender.send(GamePacket::BundleItemSelected {
+        slot: i32::from(slot),
+        index: selected,
+    });
 }
 
 /// Vanilla `MultiPlayerGameMode.handleCreativeModeItemAdd`: the creative
@@ -2398,7 +2397,7 @@ pub(crate) fn set_creative_slot(
     game: &mut GameState,
     connection: &ConnectionHandle,
     slot_num: u16,
-    item: azalea_inventory::ItemStack,
+    item: pomme_item::ItemStack,
 ) -> bool {
     if !send_creative_slot(game, connection, slot_num, item.clone()) {
         return false;
@@ -2413,7 +2412,7 @@ pub(crate) fn set_creative_slot(
 pub(crate) fn drop_creative_item(
     game: &mut GameState,
     connection: &ConnectionHandle,
-    item: azalea_inventory::ItemStack,
+    item: pomme_item::ItemStack,
 ) -> bool {
     let sent = send_creative_slot(game, connection, u16::MAX, item);
     if sent {
@@ -2428,21 +2427,15 @@ fn send_creative_slot(
     game: &GameState,
     connection: &ConnectionHandle,
     slot_num: u16,
-    item: azalea_inventory::ItemStack,
+    item: pomme_item::ItemStack,
 ) -> bool {
-    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-
     if !crate::player::is_creative(game.player.game_mode) {
         return false;
     }
-    connection
-        .packet_tx
-        .send(ServerboundGamePacket::SetCreativeModeSlot(
-            ServerboundSetCreativeModeSlot {
-                slot_num,
-                item_stack: item,
-            },
-        ));
+    connection.packet_tx.send(GamePacket::SetCreativeModeSlot {
+        slot: slot_num as i16,
+        stack: item.to_wire(),
+    });
     true
 }
 
@@ -2455,13 +2448,10 @@ pub(crate) fn send_container_clicks(
     audio: &crate::audio::AudioEngine,
     ops: Vec<azalea_inventory::operations::ClickOperation>,
 ) {
-    use azalea_inventory::ItemStack;
     use azalea_inventory::operations::{
         ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
     };
-    use azalea_protocol::packets::game::s_container_click::{
-        HashedStack, ServerboundContainerClick,
-    };
+    use pomme_item::ItemStack;
 
     use crate::player::menu_click;
 
@@ -2479,6 +2469,7 @@ pub(crate) fn send_container_clicks(
             .open_container
             .as_ref()
             .map_or(ContainerKind::Player, |c| c.click_kind(&game.recipe_book));
+        let drops = menu_click::drops_item(game.menu_slots(), &game.cursor_item, op);
         let (changed, carried): (Vec<(u16, ItemStack)>, ItemStack) = match op {
             ClickOperation::QuickCraft(QuickCraftClick {
                 kind: qc_kind,
@@ -2540,23 +2531,41 @@ pub(crate) fn send_container_clicks(
             }
         };
 
-        let mut click = ServerboundContainerClick {
-            container_id,
-            state_id,
-            slot_num: op.slot_num().map(|s| s as i16).unwrap_or(-999),
-            button_num: op.button_num(),
-            click_type: op.click_type(),
-            changed_slots: Default::default(),
-            carried_item: HashedStack::from_item_stack(&carried, &game.registries),
-        };
-        for (s, item) in &changed {
-            click
-                .changed_slots
-                .insert(*s, HashedStack::from_item_stack(item, &game.registries));
+        // Vanilla runs the click locally, where the drop swings, before
+        // sending it.
+        // TODO: as for the other drops, only the packet; the arm doesn't move.
+        if drops {
+            send_use_swing(&connection.packet_tx, InteractionHand::MainHand);
         }
+        let hashed = |item| crate::net::item_codec::hashed_stack(item, &game.registries);
         connection
             .packet_tx
-            .send(ServerboundGamePacket::ContainerClick(click));
+            .send(GamePacket::ContainerClick(ContainerClick {
+                container_id,
+                state_id: state_id as i32,
+                slot: op.slot_num().map(|s| s as i16).unwrap_or(-999),
+                button: op.button_num() as i8,
+                input: container_input(op.click_type()),
+                changed_slots: changed
+                    .iter()
+                    .map(|(s, item)| (*s as i16, hashed(item)))
+                    .collect(),
+                carried: hashed(&carried),
+            }));
+    }
+}
+
+/// The wire's `ContainerInput` for a click.
+fn container_input(click: azalea_inventory::operations::ClickType) -> ContainerInput {
+    use azalea_inventory::operations::ClickType;
+    match click {
+        ClickType::Pickup => ContainerInput::Pickup,
+        ClickType::QuickMove => ContainerInput::QuickMove,
+        ClickType::Swap => ContainerInput::Swap,
+        ClickType::Clone => ContainerInput::Clone,
+        ClickType::Throw => ContainerInput::Throw,
+        ClickType::QuickCraft => ContainerInput::QuickCraft,
+        ClickType::PickupAll => ContainerInput::PickupAll,
     }
 }
 
@@ -2571,7 +2580,6 @@ fn crafter_slot_clicked(
     op: &azalea_inventory::operations::ClickOperation,
 ) {
     use azalea_inventory::operations::{ClickOperation, PickupClick};
-    use azalea_protocol::packets::game::s_container_slot_state_changed::ServerboundContainerSlotStateChanged;
 
     use crate::ui::crafter::{GRID_SLOTS, slot_disabled};
 
@@ -2617,13 +2625,11 @@ fn crafter_slot_clicked(
     c.data[slot] = if enable { 0 } else { 1 };
     connection
         .packet_tx
-        .send(ServerboundGamePacket::ContainerSlotStateChanged(
-            ServerboundContainerSlotStateChanged {
-                slot_id: slot as u32,
-                container_id: c.id,
-                new_state: enable,
-            },
-        ));
+        .send(GamePacket::ContainerSlotStateChanged {
+            slot: slot as i32,
+            container_id: c.id,
+            new_state: enable,
+        });
     // `player.playSound`: a local sound at the player, in the players source.
     audio.play_world_sound(
         &crate::audio::SoundRef::event("ui.button.click"),
@@ -2812,7 +2818,7 @@ fn eye_lightmap_brightness(game: &GameState) -> f32 {
 /// check (item components aren't tracked): a carved pumpkin in the head slot.
 fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
     match player.inventory.slot(crate::player::inventory::ARMOR_START) {
-        azalea_inventory::ItemStack::Present(d) => {
+        pomme_item::ItemStack::Present(d) => {
             crate::player::inventory::item_resource_name(d.kind) == "carved_pumpkin"
         }
         _ => false,
@@ -2852,7 +2858,7 @@ fn render_death_time(death_time: u32, partial_tick: f32) -> f32 {
 /// selected item's type or hover name changes, clears when the slot empties,
 /// and otherwise counts down.
 fn tick_tool_highlight(core: &AppCore, game: &mut GameState) {
-    use azalea_inventory::ItemStack;
+    use pomme_item::ItemStack;
     let selected = game
         .player
         .inventory
@@ -3034,6 +3040,7 @@ pub fn update_game(
     gfx.renderer.set_vsync(core.menu.vsync);
     gfx.renderer
         .set_menu_blur_radius(core.menu.menu_background_blurriness);
+    gfx.renderer.set_chunk_fade_ms(core.menu.chunk_fade_ms());
     game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
@@ -3239,17 +3246,20 @@ pub fn update_game(
         }
     }
     if let Some((id, command)) = game.chat.take_suggestion_request() {
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::CommandSuggestion(
-                ServerboundCommandSuggestion { id, command },
-            ));
+        connection.packet_tx.send(GamePacket::CommandSuggestion {
+            id: id as i32,
+            command,
+        });
     }
 
     // Chat counts as text capture too, so digits/E/Q/F type instead of acting
     // as game keys (vanilla suppresses KeyMappings while any screen is open).
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
-    core.input.menu_capture = game.gui_open() || game.death_screen_open;
+    let screen_open = game.paused || game.gui_open() || game.death_screen_open;
+    if screen_open && !core.input.menu_capture {
+        core.input.screen_opened();
+    }
+    core.input.menu_capture = screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let faces_shown = (core.input.spectator && game.spectator.is_menu_active())
         || (game.online_mode && core.input.performing_action(input::Action::ViewPlayerList));
@@ -3360,7 +3370,7 @@ pub fn update_game(
     for profile in shown
         .iter()
         .chain([inventory.offhand(), &game.cursor_item])
-        .filter_map(azalea_inventory::ItemStack::as_present)
+        .filter_map(pomme_item::ItemStack::as_present)
         .filter_map(crate::ui::common::HeadProfile::of_stack)
     {
         core.request_head(profile);
@@ -3733,7 +3743,7 @@ pub fn update_game(
                 clicked: core.input.left_just_pressed(),
                 shift: core.input.shift_held(),
                 command_tree: command_tree.as_deref(),
-                advanced_item_tooltips: game.advanced_item_tooltips,
+                advanced_item_tooltips: core.menu.advanced_item_tooltips,
                 key_bindings: &core.input.key_bindings,
                 text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
                 spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
@@ -4201,12 +4211,7 @@ pub fn update_game(
                     gfx.renderer.menu_text_width(s, common::FONT_SIZE)
                 })
         {
-            use azalea_protocol::packets::game::s_rename_item::ServerboundRenameItem;
-            connection
-                .packet_tx
-                .send(ServerboundGamePacket::RenameItem(ServerboundRenameItem {
-                    name,
-                }));
+            connection.packet_tx.send(GamePacket::RenameItem { name });
         }
         let main_x_offset = recipe_frame.map_or(0.0, |frame| frame.main_x_offset);
         let (mut effects, effect_tooltip) = game.screen_effects(sw, sh, gs, cursor, &|spans, s| {
@@ -4214,7 +4219,7 @@ pub fn update_game(
         });
         let recipe_book_visible = recipe_frame.is_some_and(|frame| frame.visible);
         let hide_main_for_book = recipe_frame.is_some_and(|frame| frame.visible && frame.narrow);
-        let mut deferred_recipe_cursor = azalea_inventory::ItemStack::Empty;
+        let mut deferred_recipe_cursor = pomme_item::ItemStack::Empty;
         let (clicked_outside, ops, hovered, pointer) = if hide_main_for_book {
             // `AbstractRecipeBookScreen`: a narrow screen with the book open
             // shows only the screen's background behind it, and the book
@@ -4413,15 +4418,10 @@ pub fn update_game(
                 }
             };
             if let Some(button_id) = result.button {
-                use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::ContainerButtonClick(
-                        ServerboundContainerButtonClick {
-                            container_id: container.id,
-                            button_id,
-                        },
-                    ));
+                connection.packet_tx.send(GamePacket::ContainerButtonClick {
+                    container_id: container.id,
+                    button_id: button_id as i32,
+                });
             }
             (
                 result.clicked_outside,
@@ -4495,7 +4495,7 @@ pub fn update_game(
         let is_bundle_slot = |game: &GameState, slot: u16| {
             game.menu_slots()
                 .get(usize::from(slot))
-                .and_then(azalea_inventory::ItemStack::as_present)
+                .and_then(pomme_item::ItemStack::as_present)
                 .is_some_and(crate::ui::bundle::is_bundle)
         };
         // Vanilla `onMouseClickAction`: a shift-click or number-key swap on a
@@ -4578,12 +4578,12 @@ pub fn update_game(
             && let Some(stack) = game
                 .menu_slots()
                 .get(usize::from(slot))
-                .and_then(azalea_inventory::ItemStack::as_present)
+                .and_then(pomme_item::ItemStack::as_present)
         {
             let lines = crate::ui::chat::stack_tooltip_lines(
                 stack,
                 &game.registries,
-                game.advanced_item_tooltips,
+                core.menu.advanced_item_tooltips,
             );
             if !lines.is_empty() {
                 crate::ui::common::push_tooltip_lines(
@@ -4644,7 +4644,7 @@ pub fn update_game(
             &game.player.inventory,
             &game.registries,
             gs,
-            game.advanced_item_tooltips,
+            core.menu.advanced_item_tooltips,
             core.input.left_held(),
             core.input.right_held(),
             core.input.shift_held(),
@@ -4720,7 +4720,11 @@ pub fn update_game(
         if changed {
             game.apply_sign_edit();
         }
-        if done || !game.sign_edit_valid() {
+        let invalid = !game.sign_edit_valid();
+        if invalid && !done {
+            tracing::info!("Closing the sign editor: its sign is gone or out of reach");
+        }
+        if done || invalid {
             game.close_sign_editor(&connection.packet_tx);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
@@ -4905,7 +4909,7 @@ pub fn update_game(
                 let is_sleeping = e.sleeping_pos.is_some();
                 let (radius, strength) = crate::entity::shadow::of_living(e);
 
-                let name = || scoreboard_name(&game.tab_list, e.uuid, e.player_uuid);
+                let name = || e.scoreboard_name(&game.tab_list);
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
                     outline_color: outline(
@@ -4970,6 +4974,8 @@ pub fn update_game(
                     is_creepy: e.is_creepy,
                     is_converting: e.is_converting,
                     is_holding_item: e.equipment(EquipmentSlot::Mainhand).is_some(),
+                    held_items: [true, false]
+                        .map(|right| e.item_held_by_arm(right).and_then(held_stack)),
                     nose_wobble_speed: extras.nose_wobble_speed,
                     is_sitting: e.is_sitting,
                     is_passenger: passengers.contains(&entity_id),
@@ -5176,7 +5182,7 @@ pub fn update_game(
             .map_or(*game.player.position, |entity| *entity.position);
         game.chunk_store
             .block_entities
-            .iter()
+            .near(camera, 64.0)
             .filter_map(|(&pos, be)| {
                 let texts = be.sign.as_deref()?;
                 let center = pos.center();
@@ -5210,7 +5216,7 @@ pub fn update_game(
         let mut renders: Vec<(bool, crate::renderer::BlockEntityRenderInfo)> = game
             .chunk_store
             .block_entities
-            .iter()
+            .near(eye, 64.0)
             .filter_map(|(pos, be)| {
                 let center = glam::DVec3::new(
                     f64::from(pos.x) + 0.5,
@@ -5238,6 +5244,10 @@ pub fn update_game(
                 // A predicted break leaves a stale entry until the server
                 // confirms; don't render entries whose block is gone.
                 if !crate::world::block_entity::is_block_entity_block(id) {
+                    return None;
+                }
+                let has_block_model = game.block_registry.render_view().has_block_model(state);
+                if !crate::world::block_entity::drawn_by_pipeline(be.kind, has_block_model) {
                     return None;
                 }
                 let props = block_state_data.properties();
@@ -5277,6 +5287,8 @@ pub fn update_game(
                         variant,
                         lid_open,
                         light,
+                        placement: crate::world::block_entity::SignBlock::of(id, props)
+                            .map(|sign| (sign.model_index(), sign.body_transformation())),
                     },
                 ))
             })
@@ -5336,7 +5348,7 @@ pub fn update_game(
             if entity.player_uuid == Some(core.user.uuid) {
                 continue;
             }
-            let name = scoreboard_name(&game.tab_list, entity.uuid, entity.player_uuid);
+            let name = entity.scoreboard_name(&game.tab_list);
             // `getDisplayName`: a player's account name, or a mob's custom
             // name when it shows it or is under the crosshair.
             let spans = match entity.player_uuid {
@@ -5444,9 +5456,9 @@ pub fn update_game(
         }
         list
     };
-    // Off without sky light (see `renderer::distant`'s TODO); capturing
-    // stops with it.
-    let distant_terrain = if game.light_engine.has_sky() {
+    // Off without sky light (see `renderer::distant`s TODO) or under a
+    // shader pack; capturing stops with it.
+    let distant_terrain = if game.light_engine.has_sky() && gfx.renderer.distant_terrain_path() {
         core.menu.distant_terrain
     } else {
         0
@@ -5473,7 +5485,11 @@ pub fn update_game(
     let shown_hands = game
         .interaction
         .hands_to_render(main_stack.as_present(), inventory.offhand().as_present());
-
+    let held_items = if benchmark_running {
+        [None, None]
+    } else {
+        [held_stack(main_stack), held_stack(inventory.offhand())]
+    };
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
@@ -5575,12 +5591,10 @@ pub fn update_game(
     if let Some(prev) = game.container_was_open
         && open_menu != Some(prev)
     {
-        use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
+        tracing::info!("Closed menu {prev}");
         connection
             .packet_tx
-            .send(ServerboundGamePacket::ContainerClose(
-                ServerboundContainerClose { container_id: prev },
-            ));
+            .send(GamePacket::ContainerClose { container_id: prev });
     }
     game.container_was_open = open_menu;
     if let Some((_, slot, _)) = stop_hovering {
@@ -5593,7 +5607,7 @@ pub fn update_game(
             core.send_respawn(connection, game);
         }
         DeathAction::TitleScreen => {
-            return GameUpdateResult::ManualDisconnect;
+            return GameUpdateResult::ExitToTitle;
         }
         DeathAction::ShowConfirm => {
             game.death_confirm = true;
@@ -5774,7 +5788,7 @@ fn transform_item_bounds(
 
 #[cfg(test)]
 mod dropped_item_tests {
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::builtin::EntityKind;
 
     use super::{
         hand_visible, item_stack_seed, should_render_local_player, sleeping_head_pitch_deg,
@@ -5831,6 +5845,15 @@ mod dropped_item_tests {
     }
 }
 
+/// A stack's item name and data, for drawing it in a hand; `None` when empty.
+fn held_stack(stack: &pomme_item::ItemStack) -> Option<(String, pomme_item::ItemStackData)> {
+    let pomme_item::ItemStack::Present(data) = stack else {
+        return None;
+    };
+    let name = crate::player::inventory::item_resource_name(data.kind);
+    (name != "air").then(|| (name, data.clone()))
+}
+
 fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f32, f32) {
     let mesh = renderer.item_mesh_info(item_name);
     let is_block_model = mesh
@@ -5873,7 +5896,7 @@ fn emit_item_copies(
     item_id: u32,
     damage: i32,
     count: i32,
-    item_stack: Option<&azalea_inventory::ItemStackData>,
+    item_stack: Option<&pomme_item::ItemStackData>,
     anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
@@ -6151,7 +6174,7 @@ const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
 };
 
 /// An `AbstractSkullBlock` item, which `LivingEntityRenderer` wears as a head.
-fn is_skull(item: &azalea_inventory::ItemStack) -> bool {
+fn is_skull(item: &pomme_item::ItemStack) -> bool {
     item.as_present().is_some_and(|d| {
         matches!(
             crate::player::inventory::item_resource_name(d.kind).as_str(),

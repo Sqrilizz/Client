@@ -483,7 +483,6 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
 /// `slim` is the 3px-wide-arm (Alex) layout; same texture offsets and pivots,
 /// only the arm boxes differ.
 // TODO: jacket/sleeve/pants overlay layers (only the hat is modeled here).
-// TODO: default-skin-by-UUID selection for players without a fetched skin.
 pub fn bake_player_model(slim: bool) -> BakedEntityModel {
     let arm_w = if slim { 3.0 } else { 4.0 };
     let right_arm_ox = if slim { -2.0 } else { -3.0 };
@@ -2715,7 +2714,7 @@ fn chest_parts(y: f32) -> [EntityPart; 3] {
 /// The model for a boat `kind` and, for a boat (not a raft), its water patch
 /// alone, sharing its part list as overlays do.
 pub fn bake_boat(
-    kind: azalea_registry::builtin::EntityKind,
+    kind: pomme_registry::builtin::EntityKind,
 ) -> (BakedEntityModel, Option<BakedEntityModel>) {
     let raft = crate::entity::is_raft(kind);
     let mut parts = if raft { raft_parts() } else { boat_parts() };
@@ -6594,33 +6593,6 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
         a[1] + (b[1] - a[1]) * t,
         a[2] + (b[2] - a[2]) * t,
     ]
-}
-
-/// Like [`generate_cube_vertices`] but with explicit per-face UV rects (face
-/// order -Z, +Z, minY, maxY, -X, +X) instead of the entity box-unwrap, for
-/// block models whose texture layout isn't a box-unwrap (e.g. signs). Rects
-/// apply in plain corner order on every slot — unlike the box unwrap, slot 3
-/// (maxY) gets no V reversal, so an asymmetric down face needs a
-/// pre-reversed rect.
-pub(crate) fn generate_cube_vertices_faces(
-    cube: &ModelCube,
-    face_uvs: &[[f32; 4]; 6],
-    tex_w: u32,
-    tex_h: u32,
-    vertices: &mut Vec<EntityVertex>,
-) {
-    let tw = tex_w as f32;
-    let th = tex_h as f32;
-    let positions = cube_face_positions(cube, true);
-    for (slot, (pos, uv)) in positions.iter().zip(face_uvs).enumerate() {
-        push_face(
-            pos,
-            [uv[0] / tw, uv[1] / th, uv[2] / tw, uv[3] / th],
-            false,
-            cube_face_normal(slot, true, cube.mirror),
-            vertices,
-        );
-    }
 }
 
 #[cfg(test)]

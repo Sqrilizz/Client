@@ -49,17 +49,26 @@ pub(super) fn translate_item_stack_template(
     out: &mut Vec<u8>,
     ctx: RecipeCtx<'_>,
 ) -> Option<()> {
-    // A non-empty `ItemStack` has a positive count; a template only rejects 0.
-    let (item, count) = if ctx.layout.item_stack_count_first {
-        let count = var_i32(cur).filter(|&count| count > 0)?;
-        (var_u32(cur)?, count)
-    } else {
-        let item = var_u32(cur)?;
-        (item, var_i32(cur).filter(|&count| count != 0)?)
-    };
+    let (item, count) = read_item_and_count(cur, ctx.layout.item_stack_count_first)?;
     wire::write_varint(out, ctx.remaps.remap(ClientRegistry::Item, item)?);
     wire::write_varint(out, count as u32);
     translate_component_patch(cur, out, ctx.remaps, ctx.layout.old_profile)
+}
+
+/// The item and count leading a non-empty `ItemStack` (`count_first`) or an
+/// `ItemStackTemplate`. A stack's count is positive; a template only rejects
+/// zero.
+pub(super) fn read_item_and_count(
+    cur: &mut Cursor<&[u8]>,
+    count_first: bool,
+) -> Option<(u32, i32)> {
+    if count_first {
+        let count = var_i32(cur).filter(|&count| count > 0)?;
+        Some((var_u32(cur)?, count))
+    } else {
+        let item = var_u32(cur)?;
+        Some((item, var_i32(cur).filter(|&count| count != 0)?))
+    }
 }
 
 /// Remaps an item stack's component patch into the native registry space.
@@ -360,48 +369,4 @@ pub(super) fn copy_component_patch(
         remaps,
     };
     items.patch(cur, out)
-}
-
-pub(super) fn remap_with<T: Registry>(
-    remaps: &RegistryRemaps,
-    reg: ClientRegistry,
-    value: &mut T,
-) -> bool {
-    match remaps.remap(reg, value.to_u32()).and_then(T::from_u32) {
-        Some(v) => {
-            *value = v;
-            true
-        }
-        None => false,
-    }
-}
-
-/// azalea's typed encoder always writes native-version component-type ids,
-/// and `DataComponentPatch` is opaque (single entries can't be rewritten or
-/// removed), so a patch touching any component the target version numbers
-/// differently is cleared wholesale rather than sent misencoded.
-pub(super) fn strip_untranslatable_components(remaps: &RegistryRemaps, data: &mut ItemStackData) {
-    let translates = |kind: DataComponentKind| {
-        remaps.remap(ClientRegistry::DataComponentType, kind.to_u32()) == Some(kind.to_u32())
-    };
-    if !data
-        .component_patch
-        .iter()
-        .all(|(kind, _)| translates(kind))
-    {
-        tracing::warn!("Dropping creative item components the wire version numbers differently");
-        data.component_patch = Default::default();
-    }
-}
-
-/// Remaps a stack's item kind, clearing the stack when the target version
-/// has no such item.
-pub(super) fn remap_stack(remaps: &RegistryRemaps, stack: &mut ItemStack) {
-    let cleared = match stack {
-        ItemStack::Present(data) => !remap_with(remaps, ClientRegistry::Item, &mut data.kind),
-        ItemStack::Empty => false,
-    };
-    if cleared {
-        *stack = ItemStack::Empty;
-    }
 }

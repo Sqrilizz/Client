@@ -1,22 +1,20 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
-use azalea_inventory::ItemStackData;
+use azalea_buf::AzBuf;
 use azalea_inventory::components::{
-    BlocksAttacks, ChargedProjectiles, Consumable, Equippable, Food, ItemUseAnimation,
-    KineticWeapon, MinimumAttackCharge, UseEffects,
+    BlocksAttacks, Consumable, DataComponentTrait, EquipmentSlot, Equippable, Food,
+    ItemUseAnimation, KineticWeapon, MinimumAttackCharge, UseEffects,
 };
-use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
-use azalea_protocol::packets::game::ServerboundGamePacket;
-pub use azalea_protocol::packets::game::s_interact::InteractionHand;
-use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
-use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
-use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
-use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::HolderSet;
-use azalea_registry::builtin::{EntityKind, ItemKind};
 use glam::{DVec3, Vec3};
+use pomme_item::ItemStackData;
+use pomme_item::components::ChargedProjectiles;
+pub use pomme_protocol::serverbound::InteractionHand;
+use pomme_protocol::serverbound::{BlockHit, GamePacket, PlayerAction as Action};
 use pomme_protocol::wire;
+use pomme_registry::HolderSet;
+use pomme_registry::builtin::{EntityKind, ItemKind};
 
 use crate::app::input::{self, InputState};
 use crate::attribute::{AttributeKind, AttributeMap};
@@ -24,13 +22,16 @@ use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{DisplayEntityStore, EntityStore, living_entity_dimensions};
 use crate::mob_effect::{ActiveMobEffects, MINING_FATIGUE};
+use crate::net::item_codec::Components;
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
+use crate::player::entity_interact::{self, Clicker, Taken, Target};
 use crate::player::inventory::item_resource_name;
 use crate::player::item_cooldowns::ItemCooldowns;
 use crate::position::BlockPos;
+use crate::recipe::ItemTags;
 use crate::renderer::pipelines::held_item::{EatAnim, HandRenderSelection, UseAnim};
 use crate::tool::{LegacyMiningEnchantments, stack_tool, sword_instantly_mines_legacy};
 use crate::world::block::block_registry::BlockRegistry;
@@ -76,6 +77,15 @@ pub struct EntityHitResult {
 pub enum HitResult {
     Block(BlockHitResult),
     Entity(EntityHitResult),
+}
+
+/// What a right click on an entity reads beyond the player's own state.
+#[derive(Clone, Copy)]
+pub struct EntityUse<'a> {
+    pub entities: &'a EntityStore,
+    /// Every vehicle's passengers.
+    pub passengers: &'a HashMap<i32, Vec<i32>>,
+    pub item_tags: &'a ItemTags,
 }
 
 /// Vanilla `InteractionHand.values()`, the order `startUseItem` tries them.
@@ -319,7 +329,6 @@ impl InteractionState {
             chunks,
             effects.biome_climate,
         );
-        self.destroy_delay = DESTROY_COOLDOWN;
     }
 
     /// Vanilla `endPredictionsUpTo` + `ClientLevel.syncBlockState`: resolves
@@ -466,7 +475,14 @@ impl InteractionState {
             .unwrap_or(max_dist * max_dist);
         let to = from + dir.as_dvec3() * block_dist_sq.sqrt();
 
-        if let Some(hit) = nearest_entity_hit(from, to, entities, display_entities) {
+        let entity_hit = nearest_entity_hit(from, to, entities);
+        let dist_sq = entity_hit
+            .as_ref()
+            .map(|h| h.location.distance_squared(from))
+            .unwrap_or(f64::MAX);
+        let (_, hit) =
+            display_entities.nearest_interaction_hit(from, to, dist_sq, entity_hit);
+        if let Some(hit) = hit {
             let dist_sq = hit.location.distance_squared(from);
             if dist_sq < block_dist_sq {
                 self.target =
@@ -503,6 +519,7 @@ impl InteractionState {
         mob_effects: &ActiveMobEffects,
         eyes_in_water: bool,
         legacy_mining: LegacyMiningEnchantments,
+        entity_use: EntityUse,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
@@ -568,6 +585,7 @@ impl InteractionState {
                 food,
                 creative,
                 input.performing_action(input::Action::Sneak),
+                entity_use,
                 effects,
                 &mut dirty_chunks,
             );
@@ -751,6 +769,16 @@ impl InteractionState {
             && (self.attack_strength_ticker as f32 / attack_strength_delay(attributes)) < required
     }
 
+    /// Vanilla `MultiPlayerGameMode.attack`: in creative, holding the button
+    /// on into a block waits the break cooldown.
+    fn attack(&mut self, sender: &PacketSender, entity_id: i32, creative: bool) {
+        sender.send_raw(wire::encode_attack(entity_id));
+        self.attack_strength_ticker = 0;
+        if creative {
+            self.destroy_delay = DESTROY_COOLDOWN;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start_attack(
         &mut self,
@@ -789,8 +817,7 @@ impl InteractionState {
                 return;
             }
             Some(HitResult::Entity(hit)) => {
-                sender.send_raw(wire::encode_attack(hit.entity_id));
-                self.attack_strength_ticker = 0;
+                self.attack(sender, hit.entity_id, creative);
                 self.swing(sender);
                 let _ = input.weak_rumble_for_instant();
                 return;
@@ -899,6 +926,7 @@ impl InteractionState {
         food: u32,
         creative: bool,
         sneaking: bool,
+        entity_use: EntityUse,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> bool {
@@ -913,12 +941,11 @@ impl InteractionState {
         let suppress_block_use = sneaking && hands.iter().any(|h| h.stack.is_some());
         for (hand, held) in HANDS.into_iter().zip(hands) {
             let result = match self.target {
-                // One interact packet; the server does the rest (trading,
-                // feeding, leads, the villager head-shake).
-                // TODO: succeeding unconditionally is an approximation;
-                // vanilla falls through to `useItem` when the client-side
-                // `interactOn` returns PASS (e.g. eating while the crosshair
-                // rests on a passive mob).
+                // Vanilla `MultiPlayerGameMode.interact`: the packet goes
+                // out whatever the entity answers, and an entity that passes
+                // leaves the click to `useItem` (a shield raised at a zombie).
+                // TODO: the world border and a spectator's pass aren't
+                // checked.
                 Some(HitResult::Entity(hit)) => {
                     sender.send_raw(wire::encode_interact(
                         hit.entity_id,
@@ -926,7 +953,40 @@ impl InteractionState {
                         hit.location - hit.entity_pos,
                         sneaking,
                     ));
-                    UseResult::Success { swing: true }
+                    let golden_dandelion = |h: &HandItem| {
+                        h.stack
+                            .is_some_and(|stack| stack.kind == ItemKind::GoldenDandelion)
+                    };
+                    let taken = entity_use
+                        .entities
+                        .living
+                        .get(&hit.entity_id)
+                        .and_then(|entity| {
+                            entity_interact::interact_on(
+                                Target {
+                                    entity,
+                                    passengers: entity_use
+                                        .passengers
+                                        .get(&hit.entity_id)
+                                        .map_or(0, Vec::len),
+                                },
+                                Clicker {
+                                    held: held.stack,
+                                    hand,
+                                    item_tags: entity_use.item_tags,
+                                    sneaking,
+                                    holding_golden_dandelion: hands.iter().any(golden_dandelion),
+                                    position: player_pos,
+                                    thundering: entity_use.entities.thundering,
+                                },
+                            )
+                        });
+                    match taken {
+                        Some(taken) => UseResult::Success {
+                            swing: taken == Taken::Swing,
+                        },
+                        None => UseResult::Pass,
+                    }
                 }
                 Some(HitResult::Block(hit)) => self.use_item_on(
                     block_registry,
@@ -939,6 +999,7 @@ impl InteractionState {
                     suppress_block_use,
                     player_pos,
                     player_aabb,
+                    look,
                     dirty_chunks,
                 ),
                 None => UseResult::Pass,
@@ -978,26 +1039,23 @@ impl InteractionState {
         suppress_block_use: bool,
         player_pos: DVec3,
         player_aabb: Aabb,
+        look: LookDirection,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> UseResult {
         self.seq += 1;
-        sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+        sender.send(GamePacket::UseItemOn {
             hand,
-            block_hit: BlockHit {
-                block_pos: hit.block_pos.into(),
+            hit: BlockHit {
+                pos: hit.block_pos.into(),
                 direction: hit.face.into(),
-                location: azalea_core::position::Vec3::new(
-                    hit.hit_point.x,
-                    hit.hit_point.y,
-                    hit.hit_point.z,
-                ),
+                location: hit.hit_point,
                 // TODO: true when the ray started inside the shape, which
                 // scaffolding placement reads.
                 inside: false,
                 world_border: false,
             },
-            seq: self.seq,
-        }));
+            sequence: self.seq as i32,
+        });
         // TODO: other interactive blocks (beacon, loom, ...)
         // should consume the click here too once their menus render.
         if hand == InteractionHand::MainHand && !suppress_block_use {
@@ -1026,6 +1084,7 @@ impl InteractionState {
             chunks,
             player_pos,
             player_aabb,
+            look,
             dirty_chunks,
         );
         UseResult::Success { swing: true }
@@ -1052,12 +1111,12 @@ impl InteractionState {
         effects: &mut BreakEffects,
     ) -> UseResult {
         self.seq += 1;
-        sender.send(ServerboundGamePacket::UseItem(ServerboundUseItem {
+        sender.send(GamePacket::UseItem {
             hand,
-            seq: self.seq,
+            sequence: self.seq as i32,
             y_rot: look.y_rot_deg(),
             x_rot: look.x_rot_deg(),
-        }));
+        });
         if self.item_cooldowns.is_on_cooldown(stack) {
             return UseResult::Pass;
         }
@@ -1369,12 +1428,22 @@ impl InteractionState {
         chunks: &ChunkStore,
         player_pos: DVec3,
         player_aabb: Aabb,
+        look: LookDirection,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
-        let Some(state) = place_block else {
+        let Some(mut state) = place_block else {
             return;
         };
         let pos = hit.block_pos.relative(hit.face);
+        if let Some(wall) = wall_torch(block_state_table.block_state_data(state).id()) {
+            let directions = nearest_looking_directions(look, hit.face);
+            let Some(placed) =
+                torch_placement(block_state_table, chunks, pos, state, wall, directions)
+            else {
+                return;
+            };
+            state = placed;
+        }
 
         // Only predict into an empty cell; replacing grass/water isn't handled yet.
         if !block_state_table
@@ -1491,6 +1560,9 @@ impl InteractionState {
                 effects,
                 dirty_chunks,
             );
+            if creative {
+                self.destroy_delay = DESTROY_COOLDOWN;
+            }
             return;
         }
 
@@ -1618,6 +1690,7 @@ impl InteractionState {
                 effects,
                 dirty_chunks,
             );
+            self.destroy_delay = DESTROY_COOLDOWN;
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
@@ -1630,11 +1703,9 @@ impl InteractionState {
     pub fn ensure_has_sent_carried_item(&mut self, sender: &PacketSender, selected_slot: u8) {
         if selected_slot != self.carried_slot {
             self.carried_slot = selected_slot;
-            sender.send(ServerboundGamePacket::SetCarriedItem(
-                ServerboundSetCarriedItem {
-                    slot: selected_slot as u16,
-                },
-            ));
+            sender.send(GamePacket::SetCarriedItem {
+                slot: i16::from(selected_slot),
+            });
         }
     }
 
@@ -1753,13 +1824,28 @@ fn swappable(stack: &ItemStackData) -> Option<Equippable> {
     stack_component::<Equippable>(stack).filter(|e| e.swappable)
 }
 
+/// Vanilla `Equippable.canBeEquippedBy`.
+// TODO: a tag is read as the game's data pack has it, not as the server
+// synced it, and one the data pack lacks is taken to include the entity.
+pub(crate) fn can_be_equipped_by(equippable: &Equippable, kind: EntityKind) -> bool {
+    match &equippable.allowed_entities {
+        None => true,
+        Some(HolderSet::Direct { contents }) => contents.contains(&kind),
+        Some(HolderSet::Named { key, .. }) => Some(key)
+            .filter(|key| key.namespace() == pomme_registry::identifier::DEFAULT_NAMESPACE)
+            .and_then(|key| pomme_registry::tags::entities::named(key.path()))
+            .is_none_or(|tag| tag.contains(&kind)),
+    }
+}
+
+pub(crate) fn player_can_equip(equippable: &Equippable) -> bool {
+    can_be_equipped_by(equippable, EntityKind::Player)
+}
+
 /// Vanilla `Equippable.swapWithEquipmentSlot` for a player, whose
 /// `canUseSlot` is always true.
 fn equip_swap_result(equippable: &Equippable, stack: &ItemStackData, worn: Worn) -> UseResult {
-    // TODO: a tag of allowed entities is taken to include the player.
-    if let Some(HolderSet::Direct { contents }) = &equippable.allowed_entities
-        && !contents.contains(&EntityKind::Player)
-    {
+    if !player_can_equip(equippable) {
         return UseResult::Pass;
     }
     if worn.locked
@@ -1993,17 +2079,15 @@ fn hand_render_selection(
 /// Vanilla `ItemInHandRenderer.isChargedCrossbow` / `CrossbowItem.isCharged`.
 pub(crate) fn is_charged_crossbow(stack: &ItemStackData) -> bool {
     stack.kind == ItemKind::Crossbow
-        && stack_component::<ChargedProjectiles>(stack).is_some_and(|c| !c.items.is_empty())
+        && stack
+            .component::<ChargedProjectiles>()
+            .is_some_and(|c| !c.items.is_empty())
 }
 
 /// The stack's component override if the server set one, else the item's
 /// default.
-pub(crate) fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
-    stack
-        .component_patch
-        .get::<T>()
-        .cloned()
-        .or_else(|| get_default_component::<T>(stack.kind))
+pub(crate) fn stack_component<T: DataComponentTrait + AzBuf>(stack: &ItemStackData) -> Option<T> {
+    stack.get_component::<T>().map(Cow::into_owned)
 }
 
 /// Vanilla `Consumable.emitParticlesAndSounds`: the shared bite / final-gulp
@@ -2161,37 +2245,50 @@ pub fn raycast(
 
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
 /// each entity's bounding box and keeps the nearest hit. A box containing the
-/// ray origin counts as distance zero.
-fn nearest_entity_hit(
-    from: DVec3,
-    to: DVec3,
-    entities: &EntityStore,
-    display_entities: &DisplayEntityStore,
-) -> Option<EntityHitResult> {
-    let mut nearest_dist_sq = f64::MAX;
-    let mut nearest = None;
-    for (&entity_id, entity) in &entities.living {
-        let dims = living_entity_dimensions(entity);
-        let aabb = dims.make_bounding_box(entity.position.into());
+/// ray origin counts as distance zero, and the last such box wins; a box hit
+/// after one of those replaces it, as vanilla's loop does. Vanilla walks the
+/// entities in the order they entered their section; ascending id stands in
+/// for that, so equally near entities don't resolve at random.
+// TODO: vanilla skips the player's own vehicle unless the ray starts inside
+// a box.
+fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
+    let mut touched: Vec<_> = entities
+        .living
+        .iter()
+        .filter_map(|(&entity_id, entity)| {
+            let entity_pos: DVec3 = entity.position.into();
+            let aabb = living_entity_dimensions(entity).make_bounding_box(entity_pos);
+            let (location, dist_sq) = if aabb.contains(from) {
+                // `SulfurCube.canBePickedFromInside`: not around its block.
+                let swallowed = entity.entity_type == EntityKind::SulfurCube
+                    && entity.equipment(EquipmentSlot::Body).is_some();
+                if swallowed {
+                    return None;
+                }
+                (from, 0.0)
+            } else {
+                let clip = aabb.clip(from, to)?;
+                (clip, clip.distance_squared(from))
+            };
+            let hit = EntityHitResult {
 
-        let (location, dist_sq) = if aabb.contains(from) {
-            (from, 0.0)
-        } else if let Some(clip) = aabb.clip(from, to) {
-            (clip, clip.distance_squared(from))
-        } else {
-            continue;
-        };
-
-        if dist_sq < nearest_dist_sq {
-            nearest_dist_sq = dist_sq;
-            nearest = Some(EntityHitResult {
                 entity_id,
                 location,
-                entity_pos: entity.position.into(),
-            });
+                entity_pos,
+            };
+            Some((hit, dist_sq))
+        })
+        .collect();
+    touched.sort_unstable_by_key(|(hit, _)| hit.entity_id);
+
+    let mut nearest_dist_sq = f64::MAX;
+    let mut nearest = None;
+    for (hit, dist_sq) in touched {
+        if dist_sq == 0.0 || dist_sq < nearest_dist_sq || nearest_dist_sq == 0.0 {
+            nearest_dist_sq = dist_sq;
+            nearest = Some(hit);
         }
     }
-    let (_, nearest) = display_entities.nearest_interaction_hit(from, to, nearest_dist_sq, nearest);
     nearest
 }
 
@@ -2247,14 +2344,12 @@ fn send_action(
     direction: Direction,
     seq: u32,
 ) {
-    sender.send(ServerboundGamePacket::PlayerAction(
-        ServerboundPlayerAction {
-            action,
-            pos: pos.into(),
-            direction: direction.into(),
-            seq,
-        },
-    ));
+    sender.send(GamePacket::PlayerAction {
+        action,
+        pos: pos.into(),
+        direction: direction.into(),
+        sequence: seq as i32,
+    });
 }
 
 /// Reports a swing from using an item, block or entity where the wire
@@ -2266,8 +2361,7 @@ pub(crate) fn send_use_swing(sender: &PacketSender, hand: InteractionHand) {
 }
 
 pub(crate) fn send_swing(sender: &PacketSender, hand: InteractionHand) {
-    use azalea_protocol::packets::game::s_swing::ServerboundSwing;
-    sender.send(ServerboundGamePacket::Swing(ServerboundSwing { hand }));
+    sender.send(GamePacket::Swing { hand });
 }
 
 /// Q / Ctrl+Q, vanilla `LocalPlayer.drop`'s player-action packet.
@@ -2289,6 +2383,115 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
         Direction::Down,
         0,
     );
+}
+
+/// The wall block of a single-state torch's `StandingAndWallBlockItem`.
+fn wall_torch(standing: &str) -> Option<&'static str> {
+    match standing {
+        "torch" => Some("wall_torch"),
+        "soul_torch" => Some("soul_wall_torch"),
+        "copper_torch" => Some("copper_wall_torch"),
+        _ => None,
+    }
+}
+
+/// Vanilla `Direction.orderedByNearest`: the six directions, the one the
+/// player looks most along first.
+fn ordered_by_nearest(look: LookDirection) -> [Direction; 6] {
+    use crate::physics::movement::{mth_cos, mth_sin};
+    let pitch = look.x_rot_rad();
+    let yaw = -look.y_rot_rad();
+    let (pitch_sin, pitch_cos) = (mth_sin(pitch), mth_cos(pitch));
+    let (yaw_sin, yaw_cos) = (mth_sin(yaw), mth_cos(yaw));
+    let (x_pos, y_pos, z_pos) = (yaw_sin > 0.0, pitch_sin < 0.0, yaw_cos > 0.0);
+    let x_yaw = if x_pos { yaw_sin } else { -yaw_sin };
+    let y_mag = if y_pos { -pitch_sin } else { pitch_sin };
+    let z_yaw = if z_pos { yaw_cos } else { -yaw_cos };
+    let (x_mag, z_mag) = (x_yaw * pitch_cos, z_yaw * pitch_cos);
+    let axis_x = if x_pos {
+        Direction::East
+    } else {
+        Direction::West
+    };
+    let axis_y = if y_pos {
+        Direction::Up
+    } else {
+        Direction::Down
+    };
+    let axis_z = if z_pos {
+        Direction::South
+    } else {
+        Direction::North
+    };
+    let [a, b, c] = if x_yaw > z_yaw {
+        if y_mag > x_mag {
+            [axis_y, axis_x, axis_z]
+        } else if z_mag > y_mag {
+            [axis_x, axis_z, axis_y]
+        } else {
+            [axis_x, axis_y, axis_z]
+        }
+    } else if y_mag > z_mag {
+        [axis_y, axis_z, axis_x]
+    } else if x_mag > y_mag {
+        [axis_z, axis_x, axis_y]
+    } else {
+        [axis_z, axis_y, axis_x]
+    };
+    [a, b, c, c.opposite(), b.opposite(), a.opposite()]
+}
+
+/// Vanilla `BlockPlaceContext.getNearestLookingDirections` for a click that
+/// doesn't replace its block: toward the clicked face first.
+fn nearest_looking_directions(look: LookDirection, clicked: Direction) -> [Direction; 6] {
+    let mut directions = ordered_by_nearest(look);
+    let first = directions
+        .iter()
+        .position(|&d| d == clicked.opposite())
+        .unwrap_or(0);
+    directions[..=first].rotate_right(1);
+    directions
+}
+
+/// Vanilla `StandingAndWallBlockItem.getPlacementState` for a torch, with
+/// `WallTorchBlock.getStateForPlacement` and both torches' `canSurvive`.
+/// `None` skips the prediction: where vanilla places nothing, where the
+/// table lacks face sturdiness, and where a standing torch would rest on a
+/// block whose centre support (`canSupportCenter`) the tables don't record.
+fn torch_placement(
+    table: BlockStateTable,
+    chunks: &ChunkStore,
+    pos: BlockPos,
+    standing: BlockState,
+    wall: &str,
+    directions: [Direction; 6],
+) -> Option<BlockState> {
+    let at = |p: BlockPos| table.block_state_data(chunks.get_block_state(p.x, p.y, p.z));
+    let mut wall_state = None;
+    for &direction in directions.iter().filter(|d| d.axis() != 1) {
+        let facing = direction.opposite();
+        if at(pos.relative(direction)).is_full_face_sturdy(facing)? {
+            wall_state = table.state_with(wall, &[("facing", facing.name())]);
+            break;
+        }
+    }
+    for direction in directions {
+        match direction {
+            Direction::Up => {}
+            Direction::Down => {
+                let below = at(pos.relative(Direction::Down));
+                if below.is_full_face_sturdy(Direction::Up)? {
+                    return Some(standing);
+                }
+                if below.has_collision() {
+                    return None;
+                }
+            }
+            _ if wall_state.is_some() => return wall_state,
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -2316,19 +2519,16 @@ mod tests {
         let Outbound::Packet(packet) = rx.try_recv().expect("slot change packet") else {
             panic!("expected structured packet");
         };
-        let ServerboundGamePacket::SetCarriedItem(packet) = *packet else {
-            panic!("expected SetCarriedItem");
-        };
-        assert_eq!(packet.slot, 5);
+        assert_eq!(*packet, GamePacket::SetCarriedItem { slot: 5 });
     }
 
     #[test]
     fn hand_render_selection_matches_vanilla() {
-        use azalea_inventory::ItemStack;
+        use pomme_item::ItemStack;
 
         let stack = |kind| ItemStackData::new(kind, 1);
         let charged = ItemStack::new(ItemKind::Crossbow, 1)
-            .with_component(ChargedProjectiles {
+            .with(&ChargedProjectiles {
                 items: vec![ItemStack::new(ItemKind::Arrow, 1)],
             })
             .as_present()
@@ -2587,6 +2787,80 @@ mod tests {
         assert!(same_item_same_components(None, None));
     }
 
+    /// Torch placement at (1, 64, 1), with stone behind it to the north
+    /// and `below` under it.
+    fn place_torch(below: &str, clicked: Direction, look: LookDirection) -> Option<BlockState> {
+        let table = BlockRegistry::native().block_state_table();
+        let chunks = ChunkStore::with_origin_chunk();
+        let state = |name| table.first_state_of(name).expect("state");
+        chunks.set_block_state(1, 64, 0, state("stone"), table);
+        chunks.set_block_state(1, 63, 1, state(below), table);
+        let directions = nearest_looking_directions(look, clicked);
+        torch_placement(
+            table,
+            &chunks,
+            BlockPos::new(1, 64, 1),
+            state("torch"),
+            "wall_torch",
+            directions,
+        )
+    }
+
+    /// The wall torch on the stone `place_torch` puts to the north.
+    fn south_wall_torch() -> Option<BlockState> {
+        BlockRegistry::native()
+            .block_state_table()
+            .state_with("wall_torch", &[("facing", "south")])
+    }
+
+    #[test]
+    fn directions_order_by_where_the_player_looks() {
+        use Direction::*;
+        assert_eq!(ordered_by_nearest(LookDirection::new(0.0, 0.0))[0], South);
+        assert_eq!(
+            ordered_by_nearest(LookDirection::new(180.0, 10.0))[0],
+            North
+        );
+        assert_eq!(ordered_by_nearest(LookDirection::new(90.0, 0.0))[0], West);
+        assert_eq!(ordered_by_nearest(LookDirection::new(0.0, 80.0))[0], Down);
+        // The clicked face's opposite leads, the rest keep their order.
+        let looking = nearest_looking_directions(LookDirection::new(0.0, 80.0), North);
+        assert_eq!(looking[..2], [South, Down]);
+    }
+
+    #[test]
+    fn a_torch_on_a_wall_predicts_the_wall_torch() {
+        // Clicking the wall's south face, even looking down at the floor.
+        for pitch in [10.0, 80.0] {
+            let look = LookDirection::new(180.0, pitch);
+            assert_eq!(
+                place_torch("stone", Direction::South, look),
+                south_wall_torch()
+            );
+        }
+        // Clicking the floor stands it up.
+        let down = LookDirection::new(180.0, 80.0);
+        assert_eq!(
+            place_torch("stone", Direction::Up, down),
+            BlockRegistry::native()
+                .block_state_table()
+                .first_state_of("torch")
+        );
+    }
+
+    #[test]
+    fn a_torch_with_unknown_support_predicts_nothing() {
+        let down = LookDirection::new(0.0, 80.0);
+        // A fence top supports a torch's centre, which the tables don't say.
+        assert_eq!(place_torch("oak_fence", Direction::Up, down), None);
+    }
+
+    #[test]
+    fn a_torch_with_nothing_below_falls_back_to_the_wall() {
+        let look = LookDirection::new(0.0, 80.0);
+        assert_eq!(place_torch("air", Direction::Up, look), south_wall_torch());
+    }
+
     #[test]
     fn a_bed_ends_the_click_after_its_one_packet() {
         use crate::net::sender::Outbound;
@@ -2617,14 +2891,71 @@ mod tests {
             false,
             dvec3(1.5, 64.0, -0.5),
             Aabb::new(dvec3(1.2, 64.0, -0.8), dvec3(1.8, 65.8, -0.2)),
+            LookDirection::new(0.0, 0.0),
             &mut Vec::new(),
         );
         assert_eq!(result, UseResult::Success { swing: false });
         let Outbound::Packet(packet) = rx.try_recv().expect("use packet") else {
             panic!("expected structured packet");
         };
-        assert!(matches!(*packet, ServerboundGamePacket::UseItemOn(_)));
+        assert!(matches!(*packet, GamePacket::UseItemOn { .. }));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_creative_attack_waits_the_break_cooldown() {
+        use crate::net::sender::Outbound;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut state = InteractionState::new();
+        state.attack(&sender, 7, false);
+        assert_eq!(state.destroy_delay, 0);
+        state.attack(&sender, 7, true);
+        assert_eq!(state.destroy_delay, DESTROY_COOLDOWN);
+        assert_eq!(state.attack_strength_ticker, 0);
+        for _ in 0..2 {
+            let Ok(Outbound::Raw(bytes)) = rx.try_recv() else {
+                panic!("expected a raw attack packet");
+            };
+            assert_eq!(bytes, wire::encode_attack(7));
+        }
+    }
+
+    #[test]
+    fn equally_near_entities_resolve_to_the_lower_id() {
+        let mut entities = EntityStore::new();
+        for id in [9, 3, 12, 5] {
+            entities.spawn_living(
+                id,
+                EntityKind::Husk,
+                Position::new(0.0, 0.0, 3.0),
+                LookDirection::default(),
+                uuid::Uuid::nil(),
+            );
+        }
+        let hit = nearest_entity_hit(
+            DVec3::new(0.0, 1.0, 0.0),
+            DVec3::new(0.0, 1.0, 6.0),
+            &entities,
+        );
+        assert_eq!(hit.map(|hit| hit.entity_id), Some(3));
+
+        // From inside their boxes the last one wins.
+        let inside = DVec3::new(0.0, 0.2, 3.0);
+        let pick = |entities: &EntityStore| {
+            nearest_entity_hit(inside, inside + DVec3::Z, entities).map(|hit| hit.entity_id)
+        };
+        assert_eq!(pick(&entities), Some(12));
+
+        // A sulfur cube holding a block can't be picked from inside it.
+        entities.living.get_mut(&12).unwrap().entity_type = EntityKind::SulfurCube;
+        assert_eq!(pick(&entities), Some(12));
+        entities.living.get_mut(&12).unwrap().equipment.insert(
+            EquipmentSlot::Body,
+            pomme_item::ItemStack::Present(ItemStackData::new(ItemKind::Tnt, 1)),
+        );
+        assert_eq!(pick(&entities), Some(9));
     }
 
     #[test]

@@ -75,8 +75,12 @@ struct Settings {
     view_bobbing: bool,
     #[serde(default = "default_menu_background_blurriness")]
     menu_background_blurriness: u8,
+    #[serde(default = "default_chunk_fade")]
+    chunk_fade: u8,
     #[serde(default)]
     show_subtitles: bool,
+    #[serde(default)]
+    advanced_item_tooltips: bool,
     #[serde(default = "default_true")]
     vignette: bool,
     #[serde(default = "default_true")]
@@ -87,6 +91,8 @@ struct Settings {
     vsync: bool,
     #[serde(default = "default_max_framerate")]
     max_framerate: u32,
+    #[serde(default)]
+    inactivity_fps_limit: InactivityFpsLimit,
     #[serde(default = "default_true")]
     show_online_status: bool,
     #[serde(default = "default_true")]
@@ -146,6 +152,9 @@ struct Settings {
     force_unicode_font: bool,
     #[serde(default = "default_japanese_glyph_variants")]
     japanese_glyph_variants: bool,
+    /// The Direct Connect address, as it was when the screen last closed.
+    #[serde(default)]
+    last_server: String,
 }
 
 fn default_fov() -> u32 {
@@ -159,6 +168,42 @@ fn default_max_framerate() -> u32 {
 /// Top of the Max Framerate slider, where the cap is disabled (matching
 /// vanilla, which treats the slider's max as unlimited).
 pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
+
+/// Vanilla `InactivityFpsLimit`: when the frame rate drops for an unattended
+/// window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InactivityFpsLimit {
+    Minimized,
+    #[default]
+    Afk,
+}
+
+impl InactivityFpsLimit {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Minimized => Self::Afk,
+            Self::Afk => Self::Minimized,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Minimized => "Minimized",
+            Self::Afk => "AFK",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Minimized => "Limits framerate only when the game window is minimized.",
+            Self::Afk => {
+                "Limits framerate to 30 when the game is not getting any player input for more \
+                 than a minute. Further limits it to 10 after 9 more minutes."
+            }
+        }
+    }
+}
 
 const CHUNK_DETAIL_MIN: u32 = 8;
 /// Top of the Chunk Detail slider, where every column meshes at full detail.
@@ -208,6 +253,20 @@ pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u8 = 5;
 
 fn default_menu_background_blurriness() -> u8 {
     DEFAULT_MENU_BACKGROUND_BLURRINESS
+}
+
+/// Vanilla `chunkSectionFadeInTime`, in twentieths of a second: 0 (none) to
+/// 40, default 15 (0.75 s).
+const MAX_CHUNK_FADE: u8 = 40;
+const DEFAULT_CHUNK_FADE: u8 = 15;
+pub const DEFAULT_CHUNK_FADE_MS: u32 = chunk_fade_ms(DEFAULT_CHUNK_FADE);
+
+fn default_chunk_fade() -> u8 {
+    DEFAULT_CHUNK_FADE
+}
+
+const fn chunk_fade_ms(twentieths: u8) -> u32 {
+    twentieths as u32 * 50
 }
 
 /// Vanilla's `OptionInstance.UnitDouble` range, for sliders an out-of-range
@@ -271,12 +330,15 @@ impl Default for Settings {
             invert_mouse_y: false,
             view_bobbing: true,
             menu_background_blurriness: default_menu_background_blurriness(),
+            chunk_fade: default_chunk_fade(),
             show_subtitles: false,
+            advanced_item_tooltips: false,
             show_autosave_indicator: true,
             vignette: true,
             entity_shadows: true,
             vsync: true,
             max_framerate: 120,
+            inactivity_fps_limit: InactivityFpsLimit::default(),
             show_online_status: true,
             show_current_server: true,
             skin_cape: true,
@@ -306,6 +368,7 @@ impl Default for Settings {
             chat: ChatOptions::default(),
             force_unicode_font: false,
             japanese_glyph_variants: default_japanese_glyph_variants(),
+            last_server: String::new(),
         }
     }
 }
@@ -397,8 +460,12 @@ pub enum MenuAction {
         protocol: Option<i32>,
     },
     ChangeTheme(PanoramaTheme),
-    /// Signed in (`Some`) or out (`None`) from the account screen.
-    Account(Option<pomme_auth::AuthAccount>),
+    /// Signed in (`Some`) or out (`None`) from the account screen;
+    /// `by_player` unless it's the stored account restored at launch.
+    Account {
+        account: Option<pomme_auth::AuthAccount>,
+        by_player: bool,
+    },
     /// Open the singleplayer world in this save folder.
     PlayWorld {
         folder: String,
@@ -542,10 +609,6 @@ const COL_RED: [f32; 4] = [0.88, 0.25, 0.32, 1.0];
 const COL_SEP: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
 /// Tint of the "Pomme" wordmark, on the title screen and in the credits roll.
 const COL_WORDMARK: [f32; 4] = [0.94, 0.96, 0.99, 0.95];
-
-const FIELD_BG: [f32; 4] = [0.06, 0.07, 0.14, 0.8];
-const FIELD_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
-const FIELD_BORDER_FOCUS: [f32; 4] = [0.29, 0.87, 0.5, 0.5];
 
 const DOUBLE_CLICK_MS: u128 = 400;
 
@@ -700,11 +763,16 @@ pub struct MainMenu {
     account_store: Arc<dyn pomme_auth::SecretStore>,
     sign_in: Arc<parking_lot::RwLock<account::SignIn>>,
     sign_in_task: Option<tokio::task::JoinHandle<()>>,
+    /// The newest sign-in attempt; see `SignInProgress`.
+    sign_in_attempt: Arc<std::sync::atomic::AtomicU64>,
     /// No launcher passed an account, so the menu is behind sign-in.
     account_required: bool,
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
+    /// The open title-screen dropdown's list as last drawn, which the
+    /// buttons under it don't see the cursor through.
+    dropdown_rect: Option<[f32; 4]>,
     /// Return target for Language/Accessibility, which open from both the
     /// title-screen icon row and the Options grid, and for Chat Settings,
     /// which also open from chat.
@@ -774,12 +842,17 @@ pub struct MainMenu {
     pub view_bobbing: bool,
     /// The Menu Background Blur radius (vanilla `MenuBlurRadius`), 0 for off.
     pub menu_background_blurriness: u8,
+    /// How long a section fades in, in twentieths of a second.
+    chunk_fade: u8,
     pub show_subtitles: bool,
+    /// Vanilla `Options.advancedItemTooltips`.
+    pub advanced_item_tooltips: bool,
     pub show_autosave_indicator: bool,
     pub vignette: bool,
     pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
+    pub inactivity_fps_limit: InactivityFpsLimit,
     pub debug_entries: crate::ui::debug_entries::DebugEntries,
     pub show_online_status: bool,
     pub show_current_server: bool,
@@ -883,7 +956,7 @@ impl MainMenu {
             saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
-            last_mp_ip: String::new(),
+            last_mp_ip: settings.last_server,
             ping_results,
             ping_generation: Default::default(),
             access_token,
@@ -898,10 +971,12 @@ impl MainMenu {
             account_store: Arc::from(crate::account::store(game_dir)),
             sign_in: Default::default(),
             sign_in_task: None,
+            sign_in_attempt: Default::default(),
             account_required: false,
             rt,
             links_open: false,
             theme_open: false,
+            dropdown_rect: None,
             settings_back: Screen::Options,
             theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
@@ -945,12 +1020,15 @@ impl MainMenu {
             menu_background_blurriness: settings
                 .menu_background_blurriness
                 .min(MAX_MENU_BACKGROUND_BLURRINESS),
+            chunk_fade: settings.chunk_fade.min(MAX_CHUNK_FADE),
             show_subtitles: settings.show_subtitles,
+            advanced_item_tooltips: settings.advanced_item_tooltips,
             show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
             entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
+            inactivity_fps_limit: settings.inactivity_fps_limit,
             debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
@@ -1204,12 +1282,15 @@ impl MainMenu {
                 invert_mouse_y: self.invert_mouse_y,
                 view_bobbing: self.view_bobbing,
                 menu_background_blurriness: self.menu_background_blurriness,
+                chunk_fade: self.chunk_fade,
                 show_subtitles: self.show_subtitles,
+                advanced_item_tooltips: self.advanced_item_tooltips,
                 show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
                 entity_shadows: self.entity_shadows,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
+                inactivity_fps_limit: self.inactivity_fps_limit,
                 show_online_status: self.show_online_status,
                 show_current_server: self.show_current_server,
                 master_volume: self.master_volume,
@@ -1239,6 +1320,7 @@ impl MainMenu {
                 chat: self.chat_options,
                 force_unicode_font: self.force_unicode_font,
                 japanese_glyph_variants: self.japanese_glyph_variants,
+                last_server: self.last_mp_ip.clone(),
             },
         )
         .is_err();
@@ -1288,6 +1370,28 @@ impl MainMenu {
     pub fn set_menu_background_blurriness(&mut self, radius: u8) {
         self.menu_background_blurriness = radius.min(MAX_MENU_BACKGROUND_BLURRINESS);
         self.settings_dirty = true;
+    }
+
+    fn set_chunk_fade(&mut self, twentieths: u8) {
+        self.chunk_fade = twentieths.min(MAX_CHUNK_FADE);
+        self.settings_dirty = true;
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub(crate) fn set_chunk_fade_secs(&mut self, secs: f32) {
+        self.set_chunk_fade((secs * 1000.0 / chunk_fade_ms(1) as f32).round() as u8);
+    }
+
+    pub fn chunk_fade_ms(&self) -> u32 {
+        chunk_fade_ms(self.chunk_fade)
+    }
+
+    /// F3+H: vanilla flips `advancedItemTooltips` and saves the options.
+    pub fn toggle_advanced_item_tooltips(&mut self, key_bindings: &KeyBindings) -> bool {
+        self.advanced_item_tooltips = !self.advanced_item_tooltips;
+        self.settings_dirty = true;
+        self.save_options(key_bindings);
+        self.advanced_item_tooltips
     }
 
     pub fn set_main_hand_right(&mut self, right: bool, key_bindings: &KeyBindings) {
@@ -1471,6 +1575,17 @@ impl MainMenu {
             .iter()
             .map(|(uuid, rgba)| (uuid.clone(), rgba.clone(), 8))
             .collect()
+    }
+
+    /// The screen a player's own disconnect leaves them on: the title screen
+    /// `to_title`, else the server list.
+    pub fn show_after_disconnect(&mut self, to_title: bool, key_bindings: &KeyBindings) {
+        let screen = if to_title {
+            Screen::Main
+        } else {
+            Screen::ServerList
+        };
+        self.set_screen(screen, key_bindings);
     }
 
     pub fn show_disconnect(&mut self, reason: String, key_bindings: &KeyBindings) {
@@ -1673,6 +1788,25 @@ impl MainMenu {
     }
 }
 
+#[cfg(feature = "test-harness")]
+impl MainMenu {
+    /// The open screen's name, as the `screen` expect checks it.
+    pub(crate) fn harness_screen(&self) -> &'static str {
+        match self.screen {
+            Screen::Main => "title",
+            Screen::ServerList => "server_list",
+            Screen::DirectConnect => "direct_connect",
+            Screen::WorldList => "world_list",
+            Screen::CreateWorld => "create_world",
+            _ => "other",
+        }
+    }
+
+    pub(crate) fn harness_address(&self) -> &str {
+        self.edit_address.value()
+    }
+}
+
 /// With a `dir` that doesn't exist, settings and the server list fall back
 /// to defaults and a settings save silently fails instead of writing.
 #[cfg(test)]
@@ -1698,6 +1832,56 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_list_takes_the_clicks_over_the_buttons_beneath_it() {
+        let mut key_bindings = KeyBindings::default();
+        let width = |text: &str, scale: f32| text.len() as f32 * scale * 0.75;
+        for theme in [
+            PanoramaTheme::Java,
+            PanoramaTheme::Pomme,
+            PanoramaTheme::Bedrock,
+        ] {
+            let open_menu = |key_bindings: &mut KeyBindings| {
+                let mut menu = test_menu("pomme-theme-list-click-test", key_bindings);
+                menu.theme = theme;
+                menu.toggle_theme();
+                menu.build(854.0, 480.0, &MenuInput::default(), key_bindings, width);
+                menu
+            };
+            let [x, y, w, h] = open_menu(&mut key_bindings)
+                .dropdown_rect
+                .expect("the open list is drawn");
+            for (i, j) in (1..10).flat_map(|i| (1..10).map(move |j| (i, j))) {
+                let mut menu = open_menu(&mut key_bindings);
+                let click = MenuInput {
+                    cursor: (x + w * i as f32 / 10.0, y + h * j as f32 / 10.0),
+                    clicked: true,
+                    ..Default::default()
+                };
+                let result = menu.build(854.0, 480.0, &click, &mut key_bindings, width);
+                assert!(
+                    !matches!(result.action, MenuAction::Quit)
+                        && matches!(menu.screen, Screen::Main),
+                    "{theme:?}: a click at ({i}, {j}) in the list reached a button beneath",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn advanced_tooltips_survive_a_restart() {
+        let dir =
+            std::env::temp_dir().join(format!("pomme-advanced-tooltips-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        assert!(!menu.advanced_item_tooltips);
+        assert!(menu.toggle_advanced_item_tooltips(&key_bindings));
+        let menu = test_menu(dir.to_str().unwrap(), &mut key_bindings);
+        assert!(menu.advanced_item_tooltips);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn options_save_as_their_screen_closes() {
@@ -1731,8 +1915,7 @@ mod tests {
             "server".into(),
             PingState::Success {
                 motd: Vec::new(),
-                online: 0,
-                max: 0,
+                players: Some((0, 0)),
                 latency_ms: 0,
                 version: String::new(),
                 protocol: 0,
@@ -1822,6 +2005,19 @@ mod tests {
     }
 
     #[test]
+    fn chunk_fade_defaults_to_three_quarters_of_a_second_and_clamps_to_two() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("chunk_fade");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(chunk_fade_ms(legacy.chunk_fade), 750);
+
+        let mut key_bindings = KeyBindings::default();
+        let mut menu = test_menu("chunk-fade-clamp", &mut key_bindings);
+        menu.set_chunk_fade(42);
+        assert_eq!(menu.chunk_fade_ms(), 2000);
+    }
+
+    #[test]
     fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {
         let mut legacy = serde_json::to_value(Settings::default()).unwrap();
         legacy
@@ -1902,6 +2098,26 @@ mod tests {
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert!(loaded.invert_mouse_x);
         assert!(loaded.invert_mouse_y);
+    }
+
+    #[test]
+    fn inactivity_fps_limit_defaults_to_afk_and_round_trips() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("inactivity_fps_limit");
+        let loaded: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Afk);
+
+        let settings = Settings {
+            inactivity_fps_limit: InactivityFpsLimit::Afk.cycle(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""inactivity_fps_limit":"minimized""#));
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Minimized);
     }
 
     #[test]

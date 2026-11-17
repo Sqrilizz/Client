@@ -270,6 +270,13 @@ pub struct RenderTimings {
     pub present_ms: f32,
 }
 
+/// Distant terrain's GPU state, there only while the option draws: its
+/// arenas and pipelines run to several hundred megabytes.
+struct Distant {
+    buffers: distant::gpu::DistantBuffers,
+    pipeline: pipelines::distant::DistantPipeline,
+}
+
 pub struct Renderer {
     ctx: rhi::backend::Context,
     swapchain: rhi::backend::Swapchain,
@@ -320,8 +327,12 @@ pub struct Renderer {
     /// What the selected pack reads about the player's surroundings.
     pack_world: pipelines::shaderpack::PackWorld,
     chunk_buffers: ChunkBufferStore,
-    distant_buffers: distant::gpu::DistantBuffers,
-    distant_pipeline: pipelines::distant::DistantPipeline,
+    distant: Option<Distant>,
+    /// Each drawn column's compiled sections and bottom section, and what the
+    /// occlusion graph last showed: the bounds distant terrain starts from
+    /// when it turns on.
+    distant_columns: HashMap<ChunkPos, (u32, i32)>,
+    chunk_visibility: Arc<HashMap<ChunkPos, u32>>,
     frames: rhi::backend::Frames,
     gpu_timer: Option<rhi::backend::GpuTimer>,
     screenshot: screenshot::ScreenshotCapture,
@@ -333,13 +344,15 @@ pub struct Renderer {
     width: u32,
     height: u32,
     last_timings: RenderTimings,
+    /// The local player's `DefaultPlayerSkin` index, drawn until their own
+    /// skin arrives, and for good without one.
+    default_skin: usize,
     /// The player's skin still downloading, applied by the frame it arrives
     /// in.
     pending_skin: Option<(
         uuid::Uuid,
         std::sync::mpsc::Receiver<Result<SkinData, String>>,
     )>,
-    user_skin_data: Option<SkinData>,
 }
 
 /// The bar's share for the loading thread; `finish`'s steps fill the rest.
@@ -568,14 +581,6 @@ impl Renderer {
         );
 
         let chunk_buffers = ChunkBufferStore::new(&ctx.device, ctx.indirect_draw);
-        let distant_buffers = distant::gpu::DistantBuffers::new(&ctx.device, ctx.indirect_draw);
-        let distant_pipeline = pipelines::distant::DistantPipeline::new(
-            &ctx.device,
-            swapchain_state.targets(),
-            &lightmap,
-            &distant_buffers,
-            ctx.indirect_draw.fragment_stores,
-        );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -651,8 +656,9 @@ impl Renderer {
             gui_item_atlas,
             font_options,
             chunk_buffers,
-            distant_buffers,
-            distant_pipeline,
+            distant: None,
+            distant_columns: HashMap::new(),
+            chunk_visibility: Arc::default(),
             frames,
             gpu_timer,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
@@ -662,8 +668,8 @@ impl Renderer {
             width: swapchain_extent.width,
             height: swapchain_extent.height,
             last_timings: RenderTimings::default(),
+            default_skin: crate::player::default_skin::STEVE,
             pending_skin: None,
-            user_skin_data: None,
         })
     }
 
@@ -770,6 +776,10 @@ impl Renderer {
     /// drew.
     pub fn set_menu_blur_radius(&mut self, radius: u8) {
         self.menu_blur_radius = radius;
+    }
+
+    pub fn set_chunk_fade_ms(&mut self, fade_ms: u32) {
+        self.chunk_buffers.set_fade_ms(fade_ms);
     }
 
     /// Vanilla `GuiRenderer.draw`: draws `elements` up to the first blur
@@ -1109,7 +1119,9 @@ impl Renderer {
             self.vsync,
         )?;
         // Its targets read the old swapchain's depth.
-        self.distant_pipeline.drop_targets(&self.ctx.device);
+        if let Some(distant) = &mut self.distant {
+            distant.pipeline.drop_targets(&self.ctx.device);
+        }
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -1125,7 +1137,9 @@ impl Renderer {
             self.chunk_pipeline.destroy(&self.ctx.device);
             self.chunk_pipeline =
                 ChunkPipeline::new(&self.ctx.device, targets, &self.atlas, &self.lightmap);
-            self.distant_pipeline.rebuild(&self.ctx.device, targets);
+            if let Some(distant) = &mut self.distant {
+                distant.pipeline.rebuild(&self.ctx.device, targets);
+            }
 
             self.hand_pipeline
                 .recreate_pipeline(&self.ctx.device, targets);
@@ -1485,7 +1499,10 @@ impl Renderer {
     /// chunk buffer store, which omits occluded sections from the GPU cull,
     /// and to the distant bounds, which follow what it draws.
     pub fn set_chunk_visibility(&mut self, vis: Arc<HashMap<ChunkPos, u32>>) {
-        self.distant_buffers.set_visibility(&self.ctx.device, &vis);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.set_visibility(&self.ctx.device, &vis);
+        }
+        self.chunk_visibility = vis.clone();
         self.chunk_buffers.set_chunk_visibility(vis);
     }
 
@@ -1537,7 +1554,9 @@ impl Renderer {
         &mut self,
         updates: impl IntoIterator<Item = distant::worker::DistantUpdate>,
     ) {
-        self.distant_buffers.upload(updates);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.upload(updates);
+        }
     }
 
     /// The distant sections the last frame's traversal asked for, and those
@@ -1548,42 +1567,99 @@ impl Renderer {
         Vec<distant::section::SectionKey>,
         Vec<distant::section::SectionKey>,
     ) {
-        self.distant_buffers.take_requests()
+        self.distant
+            .as_mut()
+            .map(|distant| distant.buffers.take_requests())
+            .unwrap_or_default()
     }
 
-    /// Where distant terrain draws from and how far; `None` for not at all.
+    /// Where distant terrain draws from and how far; `None` for not at all,
+    /// which frees its GPU state until it next draws.
     pub(crate) fn set_distant_view(&mut self, view: Option<distant::gpu::View>) {
-        self.distant_buffers.set_view(view);
+        let Some(view) = view else {
+            if self.distant.is_some() {
+                self.wait_for_all_frames();
+                self.destroy_distant();
+            }
+            return;
+        };
+        let distant = match self.distant.take() {
+            Some(distant) => distant,
+            None => self.create_distant(),
+        };
+        self.distant.insert(distant).buffers.set_view(Some(view));
+    }
+
+    fn create_distant(&self) -> Distant {
+        let device = &self.ctx.device;
+        let mut buffers = distant::gpu::DistantBuffers::new(device, self.ctx.indirect_draw);
+        let pipeline = pipelines::distant::DistantPipeline::new(
+            device,
+            self.swapchain.targets(),
+            &self.lightmap,
+            &buffers,
+            self.ctx.indirect_draw.fragment_stores,
+        );
+        for (&pos, &(sections, min_section)) in &self.distant_columns {
+            buffers.set_column_sections(device, pos, sections, min_section);
+        }
+        buffers.set_visibility(device, &self.chunk_visibility);
+        Distant { buffers, pipeline }
+    }
+
+    fn destroy_distant(&mut self) {
+        if let Some(mut distant) = self.distant.take() {
+            distant.buffers.destroy(&self.ctx.device);
+            distant.pipeline.destroy(&self.ctx.device);
+        }
     }
 
     /// Which of column `pos`'s sections draw (a bit per section from
     /// `min_section` up), where distant terrain gives way to them.
     pub fn set_distant_column_sections(&mut self, pos: ChunkPos, sections: u32, min_section: i32) {
-        self.distant_buffers
-            .set_column_sections(&self.ctx.device, pos, sections, min_section);
+        if sections == 0 {
+            self.distant_columns.remove(&pos);
+        } else {
+            self.distant_columns.insert(pos, (sections, min_section));
+        }
+        if let Some(distant) = &mut self.distant {
+            distant
+                .buffers
+                .set_column_sections(&self.ctx.device, pos, sections, min_section);
+        }
     }
 
     /// Drops all distant terrain and forgets every loaded chunk, for a new
     /// level.
     pub fn reset_distant(&mut self) {
-        self.wait_for_all_frames();
-        self.distant_buffers.clear();
-        self.distant_buffers.clear_bounds();
+        self.distant_columns.clear();
+        if let Some(distant) = &mut self.distant {
+            self.frames.wait_all(&self.ctx.device);
+            distant.buffers.clear();
+            distant.buffers.clear_bounds();
+        }
     }
 
     /// Whether distant terrain is uploaded at block column `x`/`z`.
     #[cfg(feature = "test-harness")]
     pub fn has_distant_column(&self, x: i32, z: i32) -> bool {
-        self.distant_buffers.has_column(x, z)
+        self.distant
+            .as_ref()
+            .is_some_and(|distant| distant.buffers.has_column(x, z))
     }
 
-    /// Whether distant terrain out to `chunks` draws this frame: on, and
-    /// the vanilla terrain path drawing (not a shader pack's, nor the
-    /// top-down benchmark view).
+    /// Whether the vanilla terrain path draws, not a shader pack's: distant
+    /// terrain's GPU state is only worth holding while it does.
+    pub fn distant_terrain_path(&self) -> bool {
+        self.shader_pack.is_none() && self.chunk_buffers.format() == TerrainFormat::Vanilla
+    }
+
+    /// Whether distant terrain out to `chunks` draws this frame: on, the
+    /// vanilla terrain path drawing, and not the top-down benchmark view.
     fn distant_draws(&self, chunks: u32) -> bool {
         chunks > 0
-            && self.shader_pack.is_none()
-            && self.chunk_buffers.format() == TerrainFormat::Vanilla
+            && self.distant.is_some()
+            && self.distant_terrain_path()
             && self.camera.top_down().is_none()
     }
 
@@ -1639,7 +1715,7 @@ impl Renderer {
         swing_progress: [f32; 2],
         equip_progress: [f32; 2],
         use_anim: [Option<UseAnim>; 2],
-        held_items: [Option<(String, azalea_inventory::ItemStackData)>; 2],
+        held_items: [Option<(String, pomme_item::ItemStackData)>; 2],
         main_hand_right: bool,
         hand_light: LightLevels,
         shown_hands: HandRenderSelection,
@@ -1668,22 +1744,9 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
-        let held_items = held_items.map(|held| {
-            held.map(|(name, stack)| {
-                let model = self.render_assets.stack_model_key(&name, &stack);
-                let item_tints =
-                    self.render_assets
-                        .item_tint_palette(&model, Some(&stack), player_team_color);
-                let has_3d_model = self.ensure_item_mesh(&model).is_block_model;
-                pipelines::held_item::HeldItemInfo {
-                    name,
-                    model,
-                    item_tints,
-                    has_3d_model,
-                    charged_crossbow: crate::player::interaction::is_charged_crossbow(&stack),
-                }
-            })
-        });
+        let held_items = held_items
+            .map(|held| held.map(|(name, stack)| self.held_item(name, &stack, player_team_color)));
+        let item_entities = &*self.with_mob_held_items(item_entities, entities);
         sky.fog_color = fog::fog_color(&sky, self.camera.forward(), render_distance);
         // Vanilla clears to the fog colour, which shows below the sky disc's
         // rim; underwater, the water fog colour.
@@ -1864,19 +1927,15 @@ impl Renderer {
         self.book_preview.destroy(device);
         self.book_preview = BookPreviewPipeline::new(device, targets, resources);
         self.entity_renderer.reload_textures(device, resources);
-        if self.hand_pipeline.reload_default_skin(device, resources) {
-            self.skin_preview.rebind_skin(
-                device,
-                self.hand_pipeline.skin_texture(),
-                self.hand_pipeline.skin_sampler(),
-            );
-        }
         self.panorama_pipeline.reload_cubemap(
             device,
             pipelines::panorama::resolve_panorama_faces(resources),
         );
         self.menu_pipeline
             .reload_resource_images(resources, device, menu_fonts);
+        if !self.hand_pipeline.has_profile_skin() {
+            self.show_default_skin(resources);
+        }
     }
 
     /// A theme switch: theme packs only alias the panorama faces, and the
@@ -1915,69 +1974,53 @@ impl Renderer {
         self.skin_preview.trigger_swing();
     }
 
-    /// Starts downloading the player's skin; vanilla `SkinManager` fetches
-    /// skins asynchronously too, drawing the default one until then.
-    #[allow(dead_code)]
-    pub fn load_player_skin(&mut self, uuid: &uuid::Uuid, rt: &tokio::runtime::Runtime) {
-        self.load_user_skin(uuid, None, rt);
-    }
-
-    pub fn load_user_skin(
+    /// Shows the local player's default skin, then starts downloading their
+    /// own when they have a profile: vanilla `SkinManager` fetches skins
+    /// asynchronously too, drawing `DefaultPlayerSkin.get(uuid)` until then.
+    // TODO: vanilla draws the skin of the profile the server sent, so an
+    // offline-mode server shows the default skin of its offline uuid; this
+    // shows the account's own skin everywhere.
+    pub fn load_player_skin(
         &mut self,
-        uuid: &uuid::Uuid,
-        username: Option<&str>,
+        user: &crate::user::UserData,
+        resources: &dyn ResourceManager,
         rt: &tokio::runtime::Runtime,
     ) {
+        self.default_skin = crate::player::default_skin::index(&user.uuid);
+        self.pending_skin = None;
+        self.ctx.device.wait_idle();
+        self.show_default_skin(resources);
+        if !user.has_profile {
+            return;
+        }
+        let uuid = user.uuid;
         let uuid_str = uuid.to_string().replace('-', "");
-        let is_v3 = uuid.get_version_num() == 3;
-        let name = username.map(|s| s.to_string());
         let (tx, rx) = std::sync::mpsc::channel();
-        let uuid_val = *uuid;
         rt.spawn(async move {
-            let res = if is_v3 {
-                if let Some(name) = &name {
-                    fetch_skin_texture_by_name(name).await
-                } else {
-                    fetch_skin_texture(&uuid_str).await
-                }
-            } else {
-                match fetch_skin_texture(&uuid_str).await {
-                    Ok(skin) => Ok(skin),
-                    Err(err) => {
-                        if let Some(name) = &name {
-                            fetch_skin_texture_by_name(name).await
-                        } else {
-                            Err(err)
-                        }
-                    }
-                }
-            };
-            let _ = tx.send(res);
+            let _ = tx.send(fetch_skin_texture(&uuid_str).await);
         });
-        self.pending_skin = Some((uuid_val, rx));
+        self.pending_skin = Some((uuid, rx));
     }
 
-    pub fn apply_user_skin(&mut self, uuid: Option<&uuid::Uuid>, skin: &SkinData) {
-        self.ctx.device.wait_idle();
-        self.hand_pipeline.reload_skin(&self.ctx.device, skin);
+    /// The caller has made the device idle.
+    fn show_default_skin(&mut self, resources: &dyn ResourceManager) {
+        let slim =
+            self.hand_pipeline
+                .reload_default_skin(&self.ctx.device, resources, self.default_skin);
+        self.rebuild_skin_preview(slim);
+    }
+
+    /// Points the skin preview at the hand's skin, with its arm model. The
+    /// caller has made the device idle.
+    fn rebuild_skin_preview(&mut self, slim: bool) {
         self.skin_preview.destroy(&self.ctx.device);
         self.skin_preview = SkinPreviewPipeline::new(
             &self.ctx.device,
             self.swapchain.targets(),
             self.hand_pipeline.skin_texture(),
             self.hand_pipeline.skin_sampler(),
-            skin.slim,
+            slim,
         );
-        self.entity_renderer.set_user_skin(&self.ctx.device, skin);
-        if let Some(uuid) = uuid {
-            self.entity_renderer
-                .update_player_skin(&self.ctx.device, uuid, skin);
-        }
-        self.user_skin_data = Some(skin.clone());
-    }
-
-    pub fn user_skin_data(&self) -> Option<&SkinData> {
-        self.user_skin_data.as_ref()
     }
 
     fn apply_fetched_skin(&mut self) {
@@ -1995,7 +2038,12 @@ impl Renderer {
         self.pending_skin = None;
         match skin {
             Ok(skin) => {
-                self.apply_user_skin(Some(&uuid), &skin);
+                // In-flight frames may still reference the old skin texture,
+                // hand mesh, and preview pipeline about to be destroyed.
+                self.ctx.device.wait_idle();
+                self.hand_pipeline.reload_skin(&self.ctx.device, &skin);
+                self.rebuild_skin_preview(skin.slim);
+                self.update_player_entity_skin(&uuid, &skin);
             }
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),
         }
@@ -2064,6 +2112,65 @@ impl Renderer {
 
     pub fn menu_text_width(&self, text: &str, scale: f32) -> f32 {
         self.menu_pipeline.geometry.text_width(text, scale)
+    }
+
+    /// A stack to draw in a hand, its mesh loaded; `team_color` is its
+    /// holder's, for `team` tints.
+    fn held_item(
+        &mut self,
+        name: String,
+        stack: &pomme_item::ItemStackData,
+        team_color: Option<u32>,
+    ) -> pipelines::held_item::HeldItemInfo {
+        let model = self.render_assets.stack_model_key(&name, stack);
+        let item_tints = self
+            .render_assets
+            .item_tint_palette(&model, Some(stack), team_color);
+        let has_3d_model = self.ensure_item_mesh(&model).is_block_model;
+        pipelines::held_item::HeldItemInfo {
+            name,
+            model,
+            item_tints,
+            has_3d_model,
+            charged_crossbow: crate::player::interaction::is_charged_crossbow(stack),
+        }
+    }
+
+    /// `item_entities` plus the items `entities` hold (vanilla
+    /// `ItemInHandLayer`), which draw with them.
+    // TODO: the holder's team colour for `team` tints.
+    fn with_mob_held_items<'a>(
+        &mut self,
+        item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
+        entities: &[EntityRenderInfo],
+    ) -> std::borrow::Cow<'a, [pipelines::item_entity::ItemRenderInfo]> {
+        let anchor = self.camera_anchor();
+        let mut items = std::borrow::Cow::Borrowed(item_entities);
+        let holders = entities
+            .iter()
+            .filter(|info| info.held_items.iter().any(Option::is_some));
+        for info in holders {
+            let Some(hands) = self.entity_renderer.hand_poses(info, anchor) else {
+                continue;
+            };
+            for (arm, held) in info.held_items.iter().enumerate() {
+                let Some((name, stack)) = held else {
+                    continue;
+                };
+                let item = self.held_item(name.clone(), stack, None);
+                let display = self
+                    .held_item_pipeline
+                    .third_person_display(&item, false, arm == 0);
+                items.to_mut().push(pipelines::item_entity::ItemRenderInfo {
+                    item_name: item.model.into(),
+                    outline_color: info.outline_color,
+                    tints: item.item_tints.into(),
+                    model_matrix: hands[arm] * display.to_matrix(),
+                    light: info.light,
+                });
+            }
+        }
+        items
     }
 
     /// Menu text width in the SGA (`minecraft:alt`) glyphs.
@@ -2149,7 +2256,9 @@ impl Renderer {
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame(&self.ctx.device);
-        self.distant_buffers.begin_frame(&self.ctx.device, frame);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.begin_frame(&self.ctx.device, frame);
+        }
         self.screenshot.collect_ready(frame, &self.ctx.device);
 
         let t_acquire = std::time::Instant::now();
@@ -2175,7 +2284,9 @@ impl Renderer {
             let (fog_distance, haze_scale) = self.distant_fog(render_distance, distant_terrain);
             let uniform =
                 CameraUniform::new(&self.camera, sky, fog_distance, eyes_in_water, haze_scale);
-            self.distant_pipeline.update_camera(frame, &uniform);
+            if let Some(distant) = &mut self.distant {
+                distant.pipeline.update_camera(frame, &uniform);
+            }
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.block_outline_pipeline.update_camera(frame, &uniform);
@@ -2199,8 +2310,10 @@ impl Renderer {
             timer.begin_frame(&encoder, frame);
         }
         self.atlas.record_animation_upload(&encoder, frame);
-        self.distant_buffers.record_model_upload(&encoder, frame);
-        self.distant_buffers.record_uploads(&encoder, frame);
+        if let Some(distant) = &mut self.distant {
+            distant.buffers.record_model_upload(&encoder, frame);
+            distant.buffers.record_uploads(&encoder, frame);
+        }
         self.lightmap.record(&self.ctx.device, &encoder);
         self.gpu_stamp(&encoder, frame, "uploads");
 
@@ -2281,7 +2394,7 @@ impl Renderer {
                     *item_tints = items
                         .iter()
                         .map(|item| {
-                            let azalea_inventory::ItemStack::Present(data) = item else {
+                            let pomme_item::ItemStack::Present(data) = item else {
                                 return Vec::new();
                             };
                             let base_name = crate::player::inventory::item_resource_name(data.kind);
@@ -2548,22 +2661,23 @@ impl Renderer {
                     self.gpu_stamp(&encoder, frame, "terrain");
 
                     let eye = self.camera_render_position();
-                    let distant = self.distant_draws(*distant_terrain);
-                    if distant {
-                        self.distant_buffers.update_roots(eye);
+                    let draws = self.distant_draws(*distant_terrain);
+                    let mut distant = self.distant.as_mut().filter(|_| draws);
+                    if let Some(distant) = &mut distant {
+                        distant.buffers.update_roots(eye);
                     }
                     // Distant terrain draws after the chunks' solid and cutout
                     // passes: bounded by their depth, into its own image, then
                     // laid into the frame. Nothing to traverse means nothing
                     // to draw or request.
-                    if distant && self.distant_buffers.top_count() > 0 {
+                    if let Some(distant) = distant.filter(|d| d.buffers.top_count() > 0) {
                         let extent = self.swapchain.extent;
                         pass.end();
-                        self.distant_pipeline.render(
+                        distant.pipeline.render(
                             &self.ctx.device,
                             &encoder,
                             frame,
-                            &mut self.distant_buffers,
+                            &mut distant.buffers,
                             &self.camera,
                             eye,
                             *render_distance,
@@ -2579,7 +2693,7 @@ impl Renderer {
                                 rhi::LoadOp::Load,
                             ),
                         );
-                        self.distant_pipeline.composite(
+                        distant.pipeline.composite(
                             &mut pass,
                             frame,
                             &self.camera,
@@ -3350,8 +3464,7 @@ impl Drop for Renderer {
         }
         self.chunk_buffers.destroy(&self.ctx.device);
         self.chunk_pipeline.destroy(&self.ctx.device);
-        self.distant_buffers.destroy(&self.ctx.device);
-        self.distant_pipeline.destroy(&self.ctx.device);
+        self.destroy_distant();
         self.lightmap.destroy(&self.ctx.device);
         self.hand_pipeline.destroy(&self.ctx.device);
         self.block_overlay_pipeline.destroy(&self.ctx.device);

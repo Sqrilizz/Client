@@ -1,24 +1,23 @@
-use azalea_protocol::address::ServerAddr;
-use azalea_protocol::packets::ClientIntention;
-use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
-use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_protocol::packets::login::c_hello::ClientboundHello;
-use azalea_protocol::packets::login::s_hello::ServerboundHello;
-use azalea_protocol::packets::login::s_key::ServerboundKey;
-use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAcknowledged;
-use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
-use azalea_protocol::read::{ReadPacketError, deserialize_packet};
 use crossbeam_channel::Sender;
+use pomme_protocol::configuration::{ConfigPacket, ServerboundConfig};
+use pomme_protocol::lifecycle::LifecyclePacket;
+use pomme_protocol::login::{self, LoginPacket, ServerboundLogin};
+use pomme_protocol::serverbound::GamePacket;
+use pomme_protocol::status::ClientIntent;
+use pomme_protocol::tags::Tags;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
 use super::NetworkEvent;
+use super::address::ServerAddr;
 use super::chat::ChatPacketError;
 use super::chat_security::{ChatSender, ProfileKeyPair};
+use super::config_wire::{ConfigFrame, Registries};
 use super::conn::{Conn, MemoryEnd, RawWriter};
-use super::handler::{handle_game_packet, handle_raw_game_packet, send_ordered};
+use super::handler::{handle_raw_game_packet, send_ordered};
 use super::sender::{Outbound, PacketSender};
+use crate::chat_component::ComponentText;
 use crate::ui::server_dialog::DialogRegistry;
 use crate::world::block::BlockStateTable;
 
@@ -31,7 +30,10 @@ pub enum ConnectionError {
     Connect(std::io::Error),
 
     #[error("packet read error: {0}")]
-    Read(#[from] Box<ReadPacketError>),
+    Read(#[from] super::frame::FrameError),
+
+    #[error("packet read error: {0}")]
+    Decode(#[from] pomme_protocol::codec::DecodeError),
 
     #[error("packet write error: {0}")]
     Write(#[from] std::io::Error),
@@ -142,14 +144,12 @@ pub async fn connect_to_server(
 
     let (mut conn, wire) = match transport {
         Transport::Remote { server, protocol } => {
-            let server_addr: ServerAddr = server
-                .as_str()
-                .try_into()
-                .map_err(|_| ConnectionError::InvalidAddress(server.clone()))?;
+            let server_addr = ServerAddr::parse(&server)
+                .ok_or_else(|| ConnectionError::InvalidAddress(server.clone()))?;
             let wire = negotiate_wire_version(&server_addr, protocol).await?;
             select_block_protocol(&event_tx, wire);
             (
-                super::resolve::connect(&server_addr, ClientIntention::Login).await?,
+                super::resolve::connect(&server_addr, ClientIntent::Login).await?,
                 wire,
             )
         }
@@ -160,8 +160,7 @@ pub async fn connect_to_server(
             adopt_wire_protocol(protocol);
             select_block_protocol(&event_tx, protocol);
             let mut conn = Conn::from_memory(end);
-            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
-                .await?;
+            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntent::Login).await?;
             (conn, protocol)
         }
     };
@@ -169,11 +168,11 @@ pub async fn connect_to_server(
     conn.translation =
         super::translate::TranslationSession::for_protocol(wire).map(std::sync::Arc::new);
 
-    let hello = ServerboundLoginPacket::Hello(ServerboundHello {
+    let frame = ServerboundLogin::Hello {
         name: username.clone(),
-        profile_id: uuid,
-    });
-    let frame = serialize_frame(&hello)?;
+        profile_id: uuid.as_u128(),
+    }
+    .encode();
     let frame = match conn.translation.as_deref() {
         Some(t) => t.translate_outbound_login_frame(frame),
         None => frame,
@@ -199,7 +198,7 @@ pub async fn connect_to_server(
         .as_deref()
         .is_some_and(|t| t.no_config_phase());
     if !no_config {
-        conn.write_packet(ServerboundLoginAcknowledged {}).await?;
+        send_login(&mut conn, ServerboundLogin::LoginAcknowledged).await?;
     }
 
     let joined = if no_config {
@@ -271,8 +270,6 @@ struct Configured {
 /// game loop to replay. That frame is the first the server sends after the
 /// profile (`PlayerList.placeNewPlayer`), with no acknowledgement in between.
 async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionError> {
-    use azalea_core::registry_holder::RegistryHolder;
-
     let login = conn.reader.read().await?;
     super::capture::record(Phase::Game, &login);
     let translation = conn
@@ -292,19 +289,19 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
         ));
     };
 
-    let mut registry_holder = RegistryHolder::default();
+    let mut registries = Registries::default();
     for frame in frames {
-        match deserialize_packet::<ClientboundConfigPacket>(&mut std::io::Cursor::new(&frame)) {
-            Ok(ClientboundConfigPacket::RegistryData(p)) => {
-                registry_holder.append(p.registry_id, p.entries);
-            }
-            Ok(_) => {}
-            Err(e) => skip_malformed_packet(e)?,
+        if let Some(ConfigFrame::Config(ConfigPacket::RegistryData(data))) =
+            super::config_wire::read_or_skip(&frame)
+        {
+            registries
+                .append_or_skip(crate::version::session_protocol(), data)
+                .map_err(ConnectionError::Disconnected)?;
         }
     }
     Ok(Joined {
         configured: Configured {
-            registries: std::sync::Arc::new(registry_holder),
+            registries: std::sync::Arc::new(registries.holder),
             dialogs: Default::default(),
         },
         deferred_login: Some(login),
@@ -333,7 +330,7 @@ async fn negotiate_wire_version(
         None => {
             let probe = async {
                 let (status, _) = super::resolve::request_status(server_addr).await.ok()?;
-                Some(status.version.protocol)
+                Some(status.version?.protocol)
             };
             tokio::time::timeout(std::time::Duration::from_secs(5), probe)
                 .await
@@ -395,58 +392,59 @@ async fn login_sequence(
     access_token: Option<&str>,
 ) -> Result<uuid::Uuid, ConnectionError> {
     loop {
-        // Read the raw frame ourselves so older-version layouts can be
-        // rewritten before the typed decode (26.1's login_finished lacks the
-        // trailing session id).
+        // Older-version layouts are rewritten before the decode (26.1's
+        // login_finished lacks the trailing session id).
         let raw = conn.reader.read().await?;
         super::capture::record(Phase::Login, &raw);
         let raw = match conn.translation.as_deref() {
             Some(t) => t.translate_login_frame(raw),
             None => raw,
         };
-        let packet: ClientboundLoginPacket = deserialize_packet(&mut std::io::Cursor::new(&raw))?;
+        let packet = login::read_frame(&raw)?;
         tracing::info!("Login packet: {:?}", std::mem::discriminant(&packet));
         match packet {
-            ClientboundLoginPacket::Hello(p) => {
-                handle_encryption(conn, &p, uuid, access_token).await?;
+            LoginPacket::Hello(hello) => {
+                handle_encryption(conn, &hello, uuid, access_token).await?;
             }
-            ClientboundLoginPacket::LoginCompression(p) => {
-                conn.set_compression_threshold(p.compression_threshold);
-                tracing::info!(
-                    "Compression enabled (threshold: {})",
-                    p.compression_threshold
-                );
+            LoginPacket::Compression(threshold) => {
+                conn.set_compression_threshold(threshold);
+                tracing::info!("Compression enabled (threshold: {threshold})");
             }
-            ClientboundLoginPacket::LoginFinished(p) => {
-                tracing::info!(
-                    "Login success: {} ({})",
-                    p.game_profile.name,
-                    p.game_profile.uuid
-                );
-                return Ok(p.game_profile.uuid);
+            LoginPacket::Finished(finished) => {
+                let id = uuid::Uuid::from_u128(finished.profile.id);
+                tracing::info!("Login success: {} ({id})", finished.profile.name);
+                return Ok(id);
             }
-            ClientboundLoginPacket::LoginDisconnect(p) => {
-                return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            LoginPacket::Disconnect(reason) => {
+                let reason = crate::ui::text::component_from_json(&reason).plain_text();
+                return Err(ConnectionError::Disconnected(
+                    crate::ui::text::strip_formatting(&reason),
+                ));
             }
-            ClientboundLoginPacket::CookieRequest(p) => {
-                conn.write_packet(
-                    azalea_protocol::packets::login::s_cookie_response::ServerboundCookieResponse {
-                        key: p.key,
-                        payload: None,
-                    },
+            // TODO: vanilla answers from the cookies an earlier transfer stored.
+            LoginPacket::CookieRequest(key) => {
+                send_login(
+                    conn,
+                    ServerboundLogin::CookieResponse { key, payload: None },
                 )
                 .await?;
             }
-            _ => {
-                tracing::debug!("Login packet: {:?}", std::mem::discriminant(&packet));
+            // Vanilla `handleCustomQuery`: every query is answered as not
+            // understood, which a server waiting on one needs to carry on.
+            LoginPacket::CustomQuery { transaction_id } => {
+                send_login(conn, ServerboundLogin::CustomQueryAnswer { transaction_id }).await?;
             }
         }
     }
 }
 
+async fn send_login(conn: &mut Conn, packet: ServerboundLogin) -> std::io::Result<()> {
+    conn.writer.write(&packet.encode()).await
+}
+
 async fn handle_encryption(
     conn: &mut Conn,
-    hello: &ClientboundHello,
+    hello: &login::Hello,
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
 ) -> Result<(), ConnectionError> {
@@ -470,11 +468,11 @@ async fn handle_encryption(
         tracing::info!("Server does not require authentication");
     }
 
-    conn.write_packet(ServerboundKey {
-        key_bytes: e.encrypted_public_key,
+    let key = ServerboundLogin::Key {
+        key: e.encrypted_public_key,
         encrypted_challenge: e.encrypted_challenge,
-    })
-    .await?;
+    };
+    send_login(conn, key).await?;
 
     conn.set_encryption_key(e.secret_key);
     tracing::info!("Encryption enabled");
@@ -493,12 +491,8 @@ async fn config_sequence(
     // returns the original registries unchanged in that case).
     previous: Option<&Configured>,
 ) -> Result<Configured, ConnectionError> {
-    use azalea_core::registry_holder::RegistryHolder;
-    use azalea_protocol::packets::config::*;
-
-    let mut registry_holder = RegistryHolder::default();
-    let mut received_registry_data = false;
-    let mut selected_known_packs = false;
+    let protocol = crate::version::session_protocol();
+    let mut registries = Registries::default();
     let mut received_dialog_tags = None;
     let mut received_timeline_tags = None;
 
@@ -506,32 +500,17 @@ async fn config_sequence(
     // listener; a reconfiguration sends neither.
     if previous.is_none() {
         // Some servers key off the brand.
-        write_config_packet(
-            conn,
-            ServerboundConfigPacket::CustomPayload(s_custom_payload::ServerboundCustomPayload {
-                identifier: "minecraft:brand".into(),
-                data: super::brand_payload().into(),
-            }),
-        )
-        .await?;
-
-        write_config_packet(
-            conn,
-            ServerboundConfigPacket::ClientInformation(
-                s_client_information::ServerboundClientInformation {
-                    information: super::client_information(
-                        view_distance,
-                        chat_options,
-                        skin_options,
-                    ),
-                },
-            ),
-        )
-        .await?;
+        let brand = GamePacket::CustomPayload {
+            id: "minecraft:brand".into(),
+            data: super::brand_payload(),
+        };
+        write_config_packet(conn, &brand).await?;
+        let information = super::client_information(view_distance, chat_options, skin_options);
+        write_config_packet(conn, &GamePacket::ClientInformation(information)).await?;
     }
 
-    // Config frames are read raw so older wire versions translate (765's
-    // registry_data fans out into several frames, hence the queue).
+    // Older wire versions translate each frame first (765's registry_data
+    // fans out into several, hence the queue).
     let mut pending = std::collections::VecDeque::new();
     loop {
         let packet = if let Some(packet) = pending.pop_front() {
@@ -539,13 +518,7 @@ async fn config_sequence(
         } else {
             tokio::select! {
                 raw = conn.reader.read() => {
-                    let raw = match raw {
-                        Ok(raw) => raw,
-                        Err(e) => {
-                            skip_malformed_packet(e)?;
-                            continue;
-                        }
-                    };
+                    let raw = raw?;
                     super::capture::record(Phase::Configuration, &raw);
                     let frames = match conn.translation.as_deref() {
                         Some(t) => t.translate_config_frame(raw),
@@ -559,12 +532,7 @@ async fn config_sequence(
                         ) {
                             continue;
                         }
-                        match deserialize_packet::<ClientboundConfigPacket>(
-                            &mut std::io::Cursor::new(&frame),
-                        ) {
-                            Ok(packet) => pending.push_back(packet),
-                            Err(e) => skip_malformed_packet(e)?,
-                        }
+                        pending.extend(super::config_wire::read_or_skip(&frame));
                     }
                     continue;
                 }
@@ -578,22 +546,9 @@ async fn config_sequence(
                             write_config_frame(conn, frame).await?;
                         }
                     } else if let Outbound::Packet(packet) = outbound
-                        && let ServerboundGamePacket::ResourcePack(p) = *packet
+                        && matches!(*packet, GamePacket::ResourcePack { .. })
                     {
-                        use azalea_protocol::packets::config::s_resource_pack as config_pack;
-                        use azalea_protocol::packets::game::s_resource_pack as game_pack;
-                        let action = match p.action {
-                            game_pack::Action::SuccessfullyLoaded => config_pack::Action::SuccessfullyLoaded,
-                            game_pack::Action::Declined => config_pack::Action::Declined,
-                            game_pack::Action::FailedDownload => config_pack::Action::FailedDownload,
-                            game_pack::Action::Accepted => config_pack::Action::Accepted,
-                            game_pack::Action::InvalidUrl => config_pack::Action::InvalidUrl,
-                            game_pack::Action::FailedReload => config_pack::Action::FailedReload,
-                            game_pack::Action::Discarded => config_pack::Action::Discarded,
-                        };
-                        write_config_packet(conn, ServerboundConfigPacket::ResourcePack(
-                            config_pack::ServerboundResourcePack { id: p.id, action },
-                        )).await?;
+                        write_config_packet(conn, &packet).await?;
                     }
                     // Anything else is discarded: vanilla defers its outbound
                     // queue, but pomme's game keeps ticking through a
@@ -603,76 +558,35 @@ async fn config_sequence(
             }
         };
         match packet {
-            ClientboundConfigPacket::RegistryData(p) => {
-                received_registry_data = true;
-                // The server omits the data of every entry the pack we claimed
-                // carries, so fill those in before azalea drops them.
-                let entries = if selected_known_packs {
-                    super::known_packs::fill_known_entries(
-                        crate::version::session_protocol(),
-                        &p.registry_id,
-                        p.entries,
-                    )
-                    .map_err(ConnectionError::Disconnected)?
-                } else {
-                    p.entries
-                };
-                registry_holder.append(p.registry_id, entries);
-            }
-            ClientboundConfigPacket::UpdateTags(p) => {
+            ConfigFrame::Config(ConfigPacket::RegistryData(data)) => registries
+                .append_or_skip(protocol, data)
+                .map_err(ConnectionError::Disconnected)?,
+            ConfigFrame::Tags(tags) => {
                 // A later packet replaces an earlier one's tags per registry.
-                if let Some(tags) = registry_tags(&p.tags, &dialog_registry_key()) {
+                if let Some(tags) = registry_tags(&tags, DIALOG_REGISTRY) {
                     received_dialog_tags = Some(tags);
                 }
-                if let Some(tags) =
-                    registry_tags(&p.tags, &super::environment_wire::TIMELINE_REGISTRY.into())
+                if let Some(tags) = registry_tags(&tags, super::environment_wire::TIMELINE_REGISTRY)
                 {
                     received_timeline_tags = Some(tags);
                 }
-                forward_tags(event_tx, &p.tags);
+                forward_tags(event_tx, &tags);
             }
-            ClientboundConfigPacket::SelectKnownPacks(p) => {
-                // Vanilla `handleSelectKnownPacks`: claim the offered packs we
-                // have ourselves, so the server can skip their registry data.
-                let known_packs = super::known_packs::select_packs(
-                    crate::version::session_protocol(),
-                    &p.known_packs,
-                );
-                selected_known_packs = !known_packs.is_empty();
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::SelectKnownPacks(
-                        s_select_known_packs::ServerboundSelectKnownPacks { known_packs },
-                    ),
-                )
-                .await?;
+            ConfigFrame::Config(ConfigPacket::SelectKnownPacks(offered)) => {
+                let known = registries.select_packs(protocol, &offered);
+                write_config_frame(conn, ServerboundConfig::SelectKnownPacks(known).encode())
+                    .await?;
             }
-            ClientboundConfigPacket::KeepAlive(p) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::KeepAlive(s_keep_alive::ServerboundKeepAlive {
-                        id: p.id,
-                    }),
-                )
-                .await?;
+            ConfigFrame::Lifecycle(LifecyclePacket::KeepAlive(id)) => {
+                write_config_packet(conn, &GamePacket::KeepAlive { id }).await?;
             }
-            ClientboundConfigPacket::Ping(p) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::Pong(s_pong::ServerboundPong { id: p.id }),
-                )
-                .await?;
+            ConfigFrame::Lifecycle(LifecyclePacket::Ping(id)) => {
+                write_config_packet(conn, &GamePacket::Pong { id }).await?;
             }
-            ClientboundConfigPacket::FinishConfiguration(_) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::FinishConfiguration(
-                        s_finish_configuration::ServerboundFinishConfiguration {},
-                    ),
-                )
-                .await?;
+            ConfigFrame::Config(ConfigPacket::FinishConfiguration) => {
+                write_config_frame(conn, ServerboundConfig::FinishConfiguration.encode()).await?;
                 return Ok(match previous {
-                    Some(previous) if !received_registry_data => Configured {
+                    Some(previous) if !registries.received => Configured {
                         registries: previous.registries.clone(),
                         dialogs: match received_dialog_tags {
                             Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
@@ -683,67 +597,38 @@ async fn config_sequence(
                     // keep the previous resolution.
                     _ => {
                         super::environment_wire::resolve_timeline_tags(
-                            &mut registry_holder,
+                            &mut registries.holder,
                             &received_timeline_tags.unwrap_or_default(),
                         );
                         Configured {
                             dialogs: std::sync::Arc::new(dialog_registry(
-                                &registry_holder,
+                                &registries.holder,
                                 received_dialog_tags.unwrap_or_default(),
                             )),
-                            registries: std::sync::Arc::new(registry_holder),
+                            registries: std::sync::Arc::new(registries.holder),
                         }
                     }
                 });
             }
-            ClientboundConfigPacket::Disconnect(p) => {
-                return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+            ConfigFrame::Lifecycle(LifecyclePacket::Disconnect(reason)) => {
+                return Err(ConnectionError::Disconnected(
+                    super::lifecycle_wire::disconnect_reason(&reason),
+                ));
             }
-            ClientboundConfigPacket::CookieRequest(p) => {
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::CookieResponse(
-                        s_cookie_response::ServerboundCookieResponse {
-                            key: p.key,
-                            payload: None,
-                        },
-                    ),
-                )
-                .await?;
+            // TODO: vanilla answers from the cookies an earlier transfer stored.
+            ConfigFrame::Config(ConfigPacket::CookieRequest(key)) => {
+                let response = ServerboundConfig::CookieResponse { key, payload: None };
+                write_config_frame(conn, response.encode()).await?;
             }
-            ClientboundConfigPacket::ResourcePackPush(p) => {
-                tracing::info!(
-                    "Server pushing resource pack {} (required: {})",
-                    p.id,
-                    p.required
-                );
-                send_ordered(
-                    event_tx,
-                    NetworkEvent::ResourcePackPush {
-                        id: p.id,
-                        url: p.url.clone(),
-                        hash: p.hash.clone(),
-                        required: p.required,
-                    },
-                );
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::ResourcePack(
-                        s_resource_pack::ServerboundResourcePack {
-                            id: p.id,
-                            action: s_resource_pack::Action::Accepted,
-                        },
-                    ),
-                )
-                .await?;
+            ConfigFrame::ResourcePack(packet) => {
+                if let Some(reply) =
+                    super::resource_pack_wire::handle_resource_pack_packet(packet, event_tx)
+                {
+                    write_config_packet(conn, &reply).await?;
+                }
             }
-            ClientboundConfigPacket::ResourcePackPop(p) => {
-                tracing::info!("Server popping resource pack {:?}", p.id);
-                send_ordered(event_tx, NetworkEvent::ResourcePackPop { id: p.id });
-            }
-            _ => {
-                tracing::debug!("Config packet: {:?}", std::mem::discriminant(&packet));
-            }
+            // The other lifecycle packets belong to the game phase.
+            ConfigFrame::Lifecycle(_) => {}
         }
     }
 }
@@ -754,7 +639,7 @@ pub(crate) fn biome_registry(
 ) -> Option<&azalea_core::registry_holder::RegistryType<simdnbt::owned::NbtCompound>> {
     holder
         .extra
-        .get(&azalea_registry::identifier::Identifier::new(
+        .get(&pomme_registry::identifier::Identifier::new(
             "minecraft:worldgen/biome",
         ))
 }
@@ -848,7 +733,7 @@ fn nbt_color_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) ->
 pub(super) fn chat_types_from_registry_holder(
     holder: &azalea_core::registry_holder::RegistryHolder,
 ) -> super::chat::ChatTypeRegistry {
-    let key: azalea_registry::identifier::Identifier = "minecraft:chat_type".into();
+    let key: pomme_registry::identifier::Identifier = "minecraft:chat_type".into();
     let entries = holder
         .extra
         .get(&key)
@@ -858,8 +743,10 @@ pub(super) fn chat_types_from_registry_holder(
 }
 
 /// The registry the dialog glyphs and holders resolve against.
-fn dialog_registry_key() -> azalea_registry::identifier::Identifier {
-    "minecraft:dialog".into()
+const DIALOG_REGISTRY: &str = "minecraft:dialog";
+
+fn dialog_registry_key() -> pomme_registry::identifier::Identifier {
+    DIALOG_REGISTRY.into()
 }
 
 fn dialog_registry(
@@ -882,38 +769,35 @@ fn dialog_registry(
 
 /// One registry's tags from an `update_tags` packet, if it has any.
 fn registry_tags(
-    tags: &azalea_protocol::common::tags::TagMap,
-    registry: &azalea_registry::identifier::Identifier,
+    tags: &Tags,
+    registry: &str,
 ) -> Option<std::collections::HashMap<String, Vec<usize>>> {
-    let tags = tags.0.get(registry)?;
     Some(
-        tags.iter()
-            .map(|tag| {
-                let entries = tag
-                    .elements
+        tags.get(registry)?
+            .iter()
+            .map(|(name, elements)| {
+                let entries = elements
                     .iter()
                     .filter_map(|&id| usize::try_from(id).ok())
                     .collect();
-                (tag.name.to_string(), entries)
+                (name.clone(), entries)
             })
             .collect(),
     )
 }
 
-/// Forwards the `minecraft:block` tags of an `update_tags` packet, if it has
-/// any.
-fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &azalea_protocol::common::tags::TagMap) {
+/// Forwards the item and `minecraft:block` tags of an `update_tags` packet.
+fn forward_tags(event_tx: &Sender<NetworkEvent>, tags: &Tags) {
     send_ordered(
         event_tx,
         NetworkEvent::ItemTags(super::recipe_wire::item_tags(tags)),
     );
-    let key: azalea_registry::identifier::Identifier = "minecraft:block".into();
-    let Some(tags) = tags.0.get(&key) else {
+    let Some(tags) = tags.get("minecraft:block") else {
         return;
     };
     let tags = tags
         .iter()
-        .map(|tag| (tag.name.to_string(), tag.elements.clone()))
+        .map(|(name, elements)| (name.clone(), elements.clone()))
         .collect();
     send_ordered(event_tx, NetworkEvent::BlockTags { tags });
 }
@@ -983,24 +867,18 @@ async fn game_loop(
     if deferred_login.is_some() {
         // 1.20.1 sends both from its login handler, where later versions send
         // them in the configuration phase (ClientPacketListener.handleLogin).
-        let info = ServerboundGamePacket::ClientInformation(
-            azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
-                client_information: super::client_information(
-                    view_distance,
-                    chat_options,
-                    skin_options,
-                ),
-            },
-        );
-        write_game_frame(&mut conn.writer, translation, serialize_frame(&info)?).await?;
+        let info = GamePacket::ClientInformation(super::client_information(
+            view_distance,
+            chat_options,
+            skin_options,
+        ));
+        write_game_frame(&mut conn.writer, translation, info.encode()).await?;
 
-        let brand = ServerboundGamePacket::CustomPayload(
-            azalea_protocol::packets::game::s_custom_payload::ServerboundCustomPayload {
-                identifier: "minecraft:brand".into(),
-                data: super::brand_payload().into(),
-            },
-        );
-        write_game_frame(&mut conn.writer, translation, serialize_frame(&brand)?).await?;
+        let brand = GamePacket::CustomPayload {
+            id: "minecraft:brand".into(),
+            data: super::brand_payload(),
+        };
+        write_game_frame(&mut conn.writer, translation, brand.encode()).await?;
     }
     loop {
         let raw = if let Some(raw) = deferred_login.take() {
@@ -1029,13 +907,7 @@ async fn game_loop(
                 raw = conn.reader.read() => raw,
             }
         };
-        let raw = match raw {
-            Ok(raw) => raw,
-            Err(e) => {
-                skip_malformed_packet(e)?;
-                continue;
-            }
-        };
+        let raw = raw?;
         super::capture::record(Phase::Game, &raw);
         if let Some(flag) = translation.and_then(|t| t.server_data_secure_chat(&raw)) {
             super::lifecycle_wire::send_secure_chat(flag, event_tx);
@@ -1077,70 +949,70 @@ async fn game_loop(
                 block_state_table,
                 &configured.registries,
                 &sender,
+                &shared_tree,
                 &mut batch_size_calculator,
                 event_tx,
             )
         {
             continue;
         }
-        match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
-            Ok(mut packet) => {
-                if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
-                    // Vanilla clears the client level before acknowledging
-                    // (ClientPacketListener.handleConfigurationStart); chat
-                    // survives the transition, block tags don't. Whatever the
-                    // game queued goes first, then the pending chat
-                    // acknowledgement.
-                    // TODO: chat events still in flight to the game thread
-                    // miss this ack; the next login resets the tracker anyway.
-                    send_ordered(event_tx, NetworkEvent::Reconfiguring);
-                    while let Ok(out) = outbound_rx.try_recv() {
-                        if let Some(frame) =
-                            outbound_frame(out, translation, &mut chat, &shared_tree)?
-                        {
-                            write_game_frame(&mut conn.writer, translation, frame).await?;
-                        }
-                    }
-                    if let Some(frame) = chat.flush_ack() {
+        match super::read_raw_frame(&raw, START_CONFIGURATION) {
+            Some(Ok(())) => {
+                // Vanilla clears the client level before acknowledging
+                // (ClientPacketListener.handleConfigurationStart); chat
+                // survives the transition, block tags don't. Whatever the
+                // game queued goes first, then the pending chat
+                // acknowledgement.
+                // TODO: chat events still in flight to the game thread
+                // miss this ack; the next login resets the tracker anyway.
+                send_ordered(event_tx, NetworkEvent::Reconfiguring);
+                while let Ok(out) = outbound_rx.try_recv() {
+                    if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)?
+                    {
                         write_game_frame(&mut conn.writer, translation, frame).await?;
                     }
-                    let ack = ServerboundGamePacket::ConfigurationAcknowledged(
-                        azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
-                    );
-                    write_game_frame(&mut conn.writer, translation, serialize_frame(&ack)?).await?;
-                    let next = config_sequence(
-                        &mut conn,
-                        view_distance,
-                        chat_options,
-                        skin_options,
+                }
+                if let Some(frame) = chat.flush_ack() {
+                    write_game_frame(&mut conn.writer, translation, frame).await?;
+                }
+                let ack = GamePacket::ConfigurationAcknowledged.encode();
+                write_game_frame(&mut conn.writer, translation, ack).await?;
+                let next = config_sequence(
+                    &mut conn,
+                    view_distance,
+                    chat_options,
+                    skin_options,
+                    event_tx,
+                    &mut outbound_rx,
+                    Some(&configured),
+                )
+                .await?;
+                if !std::sync::Arc::ptr_eq(&next.registries, &configured.registries) {
+                    chat_types = chat_types_from_registry_holder(&next.registries);
+                    send_ordered(event_tx, NetworkEvent::Registries(next.registries.clone()));
+                    send_ordered(
                         event_tx,
-                        &mut outbound_rx,
-                        Some(&configured),
-                    )
-                    .await?;
-                    if !std::sync::Arc::ptr_eq(&next.registries, &configured.registries) {
-                        chat_types = chat_types_from_registry_holder(&next.registries);
-                        send_ordered(event_tx, NetworkEvent::Registries(next.registries.clone()));
-                        send_ordered(
-                            event_tx,
-                            NetworkEvent::BiomeColors {
-                                colors: extract_biome_climate(&next.registries),
-                            },
-                        );
-                    }
-                    if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
-                        send_ordered(event_tx, NetworkEvent::DialogRegistry(next.dialogs.clone()));
-                    }
-                    configured = next;
-                    continue;
+                        NetworkEvent::BiomeColors {
+                            colors: extract_biome_climate(&next.registries),
+                        },
+                    );
                 }
-                if let Some(t) = translation
-                    && !t.remap_inbound(&mut packet)
-                {
-                    continue;
+                if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
+                    send_ordered(event_tx, NetworkEvent::DialogRegistry(next.dialogs.clone()));
                 }
-                if let ClientboundGamePacket::UpdateTags(p) = &packet {
-                    if let Some(tags) = registry_tags(&p.tags, &dialog_registry_key()) {
+                configured = next;
+                continue;
+            }
+            Some(Err(e)) => {
+                tracing::warn!("Skipping malformed start_configuration packet: {e}");
+                continue;
+            }
+            None => {}
+        }
+        if let Some(tags) = super::read_raw_frame(&raw, pomme_protocol::tags::read) {
+            match tags {
+                Ok(tags) => {
+                    if let Some(tags) = registry_tags(&tags, DIALOG_REGISTRY) {
                         configured.dialogs =
                             std::sync::Arc::new(configured.dialogs.with_tags(tags));
                         send_ordered(
@@ -1148,20 +1020,17 @@ async fn game_loop(
                             NetworkEvent::DialogRegistry(configured.dialogs.clone()),
                         );
                     }
-                    forward_tags(event_tx, &p.tags);
+                    forward_tags(event_tx, &tags);
                 }
-                handle_game_packet(
-                    &packet,
-                    &sender,
-                    event_tx,
-                    &configured.registries,
-                    &shared_tree,
-                );
+                Err(e) => tracing::warn!("Skipping malformed update_tags packet: {e}"),
             }
-            Err(e) => skip_malformed_packet(e)?,
         }
     }
 }
+
+/// `start_configuration`, which carries nothing.
+pub(super) const START_CONFIGURATION: super::RawRead<()> =
+    |name, _| (name == "start_configuration").then_some(Ok(()));
 
 /// The frame one queued outbound item writes, if any.
 fn outbound_frame(
@@ -1172,17 +1041,10 @@ fn outbound_frame(
 ) -> Result<Option<Vec<u8>>, ConnectionError> {
     Ok(match out {
         Outbound::Packet(mut packet) => {
-            // Pomme encodes creative slots itself in vanilla's layout; a wire
-            // version with an item grammar translates that encoding.
-            if let ServerboundGamePacket::SetCreativeModeSlot(p) = &*packet
-                && translation.is_none_or(|t| t.translates_items())
-            {
-                return Ok(Some(super::item_codec::creative_slot_frame(p)));
-            }
             if let Some(t) = translation {
                 t.remap_outbound(&mut packet);
             }
-            Some(serialize_frame(&*packet)?)
+            Some(packet.encode())
         }
         Outbound::Raw(bytes) => Some(bytes),
         Outbound::ChatInput(input) => match chat.encode_input(&input, tree.lock().as_deref()) {
@@ -1224,14 +1086,6 @@ fn custom_click_frame(
         .ok()
 }
 
-fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
-    packet: &P,
-) -> Result<Vec<u8>, ConnectionError> {
-    azalea_protocol::write::serialize_packet(packet)
-        .map(Vec::from)
-        .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))
-}
-
 /// Writes one native-layout frame, translating it for other wire versions.
 async fn write_game_frame(
     writer: &mut RawWriter,
@@ -1248,17 +1102,17 @@ async fn write_game_frame(
     Ok(())
 }
 
-/// Writes one native-layout configuration packet, translating it for other
-/// wire versions (767 down: id remaps, suppression of packets the wire version
-/// lacks, and the few layout rewrites in `translate_outbound_config_frame`).
-async fn write_config_packet(
-    conn: &mut Conn,
-    packet: ServerboundConfigPacket,
-) -> Result<(), ConnectionError> {
-    write_config_frame(conn, serialize_frame(&packet)?).await
+/// Writes a packet configuration shares with the game phase.
+async fn write_config_packet(conn: &mut Conn, packet: &GamePacket) -> Result<(), ConnectionError> {
+    let frame = packet
+        .encode_in(Phase::Configuration)
+        .unwrap_or_else(|| panic!("{} isn't a configuration packet", packet.name()));
+    write_config_frame(conn, frame).await
 }
 
-/// [`write_config_packet`] for an already-encoded native-layout frame.
+/// Writes one native-layout configuration frame, translating it for other
+/// wire versions (767 down: id remaps, suppression of packets the wire version
+/// lacks, and the few layout rewrites in `translate_outbound_config_frame`).
 async fn write_config_frame(conn: &mut Conn, frame: Vec<u8>) -> Result<(), ConnectionError> {
     let frame = match conn
         .translation
@@ -1272,20 +1126,6 @@ async fn write_config_frame(conn: &mut Conn, frame: Vec<u8>) -> Result<(), Conne
         None => frame,
     };
     Ok(conn.writer.write(&frame).await?)
-}
-
-/// Recoverable decode errors skip the packet; anything else tears down the
-/// connection.
-fn skip_malformed_packet(err: Box<ReadPacketError>) -> Result<(), ConnectionError> {
-    match &*err {
-        ReadPacketError::Parse { .. }
-        | ReadPacketError::UnknownPacketId { .. }
-        | ReadPacketError::LeftoverData { .. } => {
-            tracing::warn!("Skipping malformed packet: {err}");
-            Ok(())
-        }
-        _ => Err(err.into()),
-    }
 }
 
 fn friendly_error_reason(err: &ConnectionError) -> String {
@@ -1312,14 +1152,84 @@ mod tests {
 
     use super::*;
 
+    /// Game-phase `update_tags` and `start_configuration` read raw.
+    #[test]
+    fn game_tags_and_start_configuration_read_raw() {
+        use azalea_protocol::common::tags::{TagMap, Tags as AzaleaTags};
+        use azalea_protocol::packets::game::{
+            ClientboundGamePacket, c_start_configuration, c_update_tags,
+        };
+
+        let tag = |name: &str, elements: Vec<i32>| AzaleaTags {
+            name: name.into(),
+            elements,
+        };
+        let map = TagMap(
+            [
+                (
+                    "minecraft:block".into(),
+                    vec![tag("minecraft:logs", vec![1, 300])],
+                ),
+                (
+                    DIALOG_REGISTRY.into(),
+                    vec![tag("minecraft:pause_screen_additions", vec![2])],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let frame = azalea_protocol::write::serialize_packet(&ClientboundGamePacket::UpdateTags(
+            c_update_tags::ClientboundUpdateTags { tags: map },
+        ))
+        .unwrap();
+        let tags = crate::net::read_raw_frame(&frame, pomme_protocol::tags::read)
+            .unwrap()
+            .unwrap();
+        let expected: Tags = [
+            (
+                "minecraft:block".to_owned(),
+                [("minecraft:logs".to_owned(), vec![1, 300])].into(),
+            ),
+            (
+                DIALOG_REGISTRY.to_owned(),
+                [("minecraft:pause_screen_additions".to_owned(), vec![2])].into(),
+            ),
+        ]
+        .into();
+        assert_eq!(tags, expected);
+        assert!(crate::net::read_raw_frame(&frame, START_CONFIGURATION).is_none());
+
+        assert_eq!(
+            registry_tags(&tags, DIALOG_REGISTRY),
+            Some([("minecraft:pause_screen_additions".to_owned(), vec![2])].into())
+        );
+        let (tx, rx) = crossbeam_channel::unbounded();
+        forward_tags(&tx, &tags);
+        assert!(rx.try_iter().any(|event| matches!(
+            event,
+            NetworkEvent::BlockTags { tags } if tags == [("minecraft:logs".to_owned(), vec![1, 300])]
+        )));
+
+        let frame =
+            azalea_protocol::write::serialize_packet(&ClientboundGamePacket::StartConfiguration(
+                c_start_configuration::ClientboundStartConfiguration,
+            ))
+            .unwrap();
+        assert!(matches!(
+            crate::net::read_raw_frame(&frame, START_CONFIGURATION),
+            Some(Ok(()))
+        ));
+    }
+
     /// A server that accepts pomme's known-pack claim sends the biomes as ids
     /// alone; the climate the mesher colours with then comes entirely from the
     /// embedded elements.
     #[test]
     fn filled_biome_entries_carry_their_climate() {
-        use azalea_registry::identifier::Identifier;
+        use pomme_registry::identifier::Identifier;
 
-        let holder = crate::net::known_packs::filled_holder("worldgen/biome");
+        let holder = crate::net::known_packs::filled_holder(NATIVE.protocol, "worldgen/biome")
+            .expect("biomes fill");
         let plains_id = holder.extra[&Identifier::new("minecraft:worldgen/biome")]
             .map
             .get_index_of(&Identifier::new("minecraft:plains"))
@@ -1423,8 +1333,11 @@ mod tests {
     async fn joins_an_integrated_server_over_the_pipe() {
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
         use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+        use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
+        use azalea_protocol::read::deserialize_packet;
         use uuid::Uuid;
 
         use crate::net::conn::memory_pipes;
@@ -1434,7 +1347,18 @@ mod tests {
         async fn sent<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
             peer: &mut Conn,
         ) -> P {
-            peer.read_packet().await.unwrap()
+            deserialize_packet(&mut std::io::Cursor::new(
+                &peer.reader.read().await.unwrap(),
+            ))
+            .unwrap()
+        }
+
+        async fn send<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
+            peer: &mut Conn,
+            packet: &P,
+        ) {
+            let frame = azalea_protocol::write::serialize_packet(packet).unwrap();
+            peer.writer.write(&frame).await.unwrap();
         }
 
         let (client_end, server_end) = memory_pipes();
@@ -1470,12 +1394,11 @@ mod tests {
             ServerboundLoginPacket::Hello(p) if p.name == "Steve"
         ));
 
-        peer.write_packet(ClientboundLoginFinished {
+        let finished = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
             game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
             session_id: Uuid::nil(),
-        })
-        .await
-        .unwrap();
+        });
+        send(&mut peer, &finished).await;
 
         assert!(matches!(
             sent(&mut peer).await,
@@ -1490,9 +1413,8 @@ mod tests {
             ServerboundConfigPacket::ClientInformation(p) if p.information.view_distance == 8
         ));
 
-        peer.write_packet(ClientboundFinishConfiguration)
-            .await
-            .unwrap();
+        let finish = ClientboundConfigPacket::FinishConfiguration(ClientboundFinishConfiguration);
+        send(&mut peer, &finish).await;
 
         assert!(matches!(
             sent(&mut peer).await,

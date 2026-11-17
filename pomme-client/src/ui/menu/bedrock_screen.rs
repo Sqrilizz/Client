@@ -415,6 +415,7 @@ impl MainMenu {
 
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
+        let beneath = self.input_beneath_dropdown(input);
 
         let (panel, column_top) = title_and_column(uw, uh);
         let [px, py, pw, ph] = panel;
@@ -441,7 +442,7 @@ impl MainMenu {
             elements: &mut elements,
             ctx: &mut ctx,
             any_hovered: &mut any_hovered,
-            input,
+            input: &beneath,
             gs,
         };
 
@@ -619,7 +620,7 @@ impl MainMenu {
             None => push_image(
                 buttons.elements,
                 [head[0], head[1], head[2], head[2]],
-                SpriteId::SteveHead,
+                SpriteId::DefaultHead(crate::player::default_skin::STEVE as u8),
                 WHITE,
             ),
         }

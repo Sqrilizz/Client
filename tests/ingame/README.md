@@ -97,7 +97,16 @@ a test exercises the real code.
 ## Writing a script
 
 A script is a list of `[[step]]` tables, run in order once the client is in
-game. Each step has exactly one action:
+game. After it leaves the game (the pause menu's Disconnect), only steps that
+work on the title screens may follow: waits, screenshots, input, `cursor_to_button`
+and `screen` checks.
+
+Scripts start under the `deterministic` step, so both clients' shots hold
+still and compare alike. A script about that noise itself (animated textures,
+particles) sets `deterministic = false` above its first step, and can turn it
+on later with the step.
+
+Each step has exactly one action:
 
 ```toml
 [[step]]
@@ -119,7 +128,8 @@ look_at = [0.5, -58.5, 4.0]                   # turn to face a point
 modifiers = { shift = true }                  # held for the clicks and presses
                                               # that follow; {} releases
 [[step]]
-mouse_down = "left"                           # or mouse_up; left, right, middle
+mouse_down = "left"                           # or mouse_up; left, right, middle,
+                                              # back, forward
 
 [[step]]
 hover = { slot = 36 }                         # creative item tab: hotbar slot
@@ -130,6 +140,9 @@ hover = { slot = 36 }                         # creative item tab: hotbar slot
                                               # the target's centre
 [[step]]
 cursor = [2, 2]                               # cursor to a point, GUI px
+[[step]]
+cursor_to_button = "Disconnect"               # cursor to the middle of the
+                                              # button with this label
 
 [[step]]
 scroll = -2                                   # mouse wheel over the open
@@ -145,6 +158,10 @@ press = { action = "key.drop", ctrl = true }  # a key binding's default key, or
 key_down = { action = "key.forward" }        # held until key_up, which
                                               # takes the same key
 [[step]]
+focus = false                                 # the window losing focus,
+                                              # letting go of held keys and
+                                              # buttons, or gaining it
+[[step]]
 bind = { action = "key.drop", keys = ["key.keyboard.j"] }  # this session only;
                                               # no keys resets the defaults
 [[step]]
@@ -154,7 +171,10 @@ option = { main_hand = "left" }               # sets client options, as the
                                               # brightness, render_distance
                                               # (chunks), distant_terrain
                                               # (chunks, 0 for off),
-                                              # show_subtitles,
+                                              # show_subtitles, chunk_fade
+                                              # (seconds),
+                                              # inactivity_fps_limit
+                                              # (minimized or afk),
                                               # shader_pack (a name in
                                               # fixtures/shaderpacks, "" for
                                               # none) and resource_pack (a name
@@ -166,7 +186,7 @@ deterministic = true                          # holds flicker, particles,
                                               # animated textures, clouds, view
                                               # bobbing and the autosave
                                               # indicator still for the rest of
-                                              # the script
+                                              # a script that started without
 [[step]]
 hold_packets = true                           # incoming packets wait unhandled
                                               # until hold_packets = false, as
@@ -183,15 +203,26 @@ chunk_arenas = { vertices = 65536, max = 1 }  # chunk arenas this small, this
 wait_ms = 1000
 
 [[step]]
+wait_ticks = 20                               # game ticks rather than time;
+                                              # the commands after it run on
+                                              # the frame it ends, so each
+                                              # reaches the same tick every
+                                              # run, as `wait_ms` can't promise
+
+[[step]]
 frame_times = { ms = 5000 }                   # times the frames for 5 s; the
                                               # report line gives the frame
                                               # rate, its 1% low, the render
                                               # encode time, the GPU wait, the
                                               # GPU's own time per pass, and
-                                              # the sections and triangles drawn
+                                              # the sections and triangles drawn;
+                                              # set `deterministic = false` to
+                                              # time clouds and particles too
 
 [[step]]
 screenshot = "equipped"                       # target/ingame/<script>/equipped.png
+keep_chat = true                              # chat is cleared before a shot,
+                                              # as F3+D clears it, unless kept
 
 [[step]]
 match_screenshots = ["first", "second"]       # fails unless two shots match
@@ -214,11 +245,13 @@ An `expect` is retried every frame until it holds or times out. It can check:
 | A dropped item | `item_entity`, optional `count` |
 | An advancement | `advancement` (id) |
 | A chat line | `chat` (text it contains) |
+| The recipe book | `recipes`: `at_least` (that many recipes known), `highlighted` (that many still marked new) |
 | A block | `block` (state name, e.g. `air`), `at`, optional `block_entity` (type) |
 | A biome | `biome` (name, e.g. `swamp`), `at` |
 | Settled terrain | `terrain = "settled"`: every loaded column meshed and uploaded (none waiting for pool space nearer than the eviction frontier, or while another arena fits), and no two of the chunk arenas' ranges overlapping; `terrain = "compacted"` also waits for no chunk arena left to drain or free, and `terrain = "evicted"` for far columns waiting for room with the eye's own column drawn |
 | Distant terrain | `distant_terrain = { at = [x, z] }`: the finest distant terrain section holding that block column is meshed and uploaded; `gone = true` for not (Pomme-only) |
-| The local player | `player = { ... }` with any of `health`, `food`, `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none), `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) and `using_item` (an item held in use, such as a raised shield) |
+| The local player | `player = { ... }` with any of `health`, `food`, `air` (the air supply in ticks, 300 when full), `level`, `game_mode`, `effect`, `no_effect`, `max_health`, `raining`, `hand`, `dimension`, `day_time`, `position` (within 0.01), `y_rot` (within 0.01), `spectating` (the kind of entity the camera follows, empty for none), `post_effect` (the spectator view effect drawn: `creeper`, `spider`, `invert`, or empty) and `using_item` (an item held in use, such as a raised shield) |
+| The screen outside a world | `screen` (`title`, `server_list`, `direct_connect`, `world_list`, `create_world`), optional `address` (the Direct Connection field) |
 | The open menu | `menu` (a container's menu type, e.g. `generic_9x3`, or `inventory`, `creative`, `pause`, `sign` (the sign editor), `none`), optional `title`; on the creative screen also `tab` (its vanilla id, e.g. `building_blocks`), `row` (the first catalog row shown) and `search` |
 | A scrolling list | `list`: where an options screen's or Key Binds' list sits, `top`, `end` or `middle` (other lists don't report it yet) |
 | The HUD text | `hud = { ... }` with any of `title`, `subtitle` and `sidebar_title` (`""` when none is shown), `boss_bars` (every name, top to bottom), `sidebar` (every row as `"name number"`, top to bottom), `tab_list` (every listed player as `{ name, game_mode? }`, in tab order), `chat_open` and `action_bar` (`""` when none shows) |
@@ -246,4 +279,4 @@ echo '{"cmd":"inventory"}' | nc 127.0.0.1 25599
 The commands are `status`, `chat` (`text`), `open_inventory`, `close_menu`,
 `click` (`slot`, `op`), `creative_set_slot` (`slot`, `from`), `inventory`,
 `entities`, `advancements`, `player`, `hud`, `sounds`, `block` (`at`), `look_at` (`at`),
-`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`).
+`mouse_down` and `mouse_up` (`button`), `press` (`action`, a key binding id like `key.drop`, or `key`, an input id like `key.keyboard.j`; optional `ctrl`), `key_down` and `key_up` (the same `action` or `key`, held between them), `bind` (`action`, optional `keys`), `option` (`main_hand`: `left` or `right`; saved as closing its options screen would, so the server is told), `modifiers` (`shift`, held until the next `modifiers`), `hover` (`slot` 36-44 or `catalog` cell in a creative item tab, a `tab` id, or the inventory tab's `trash`; optional `offset`), `cursor` (`at`, GUI px), `cursor_to_button` (`label`), `scroll` (`y`, wheel lines), `text` (`text`), `chat_log` and `screenshot` (`path`, optional `keep_chat`).

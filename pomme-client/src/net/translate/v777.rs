@@ -254,55 +254,6 @@ pub(super) fn translate_level_particles_777(
     Some(out)
 }
 
-/// Rewrites `update_advancements`: 26.3 moved an advancement's screen
-/// position (two floats) out of `DisplayInfo` to a pair after each entry,
-/// sent even without a display. 26.2 reads the pair at the end of the
-/// display, so each entry is walked to put it back or drop it; the rest of
-/// the packet copies verbatim. Item ids stay in wire space like every
-/// version's.
-/// TODO: remap advancement icon items in `remap_inbound`.
-pub(super) fn translate_update_advancements_777(
-    id: u32,
-    payload: &[u8],
-    remaps: &RegistryRemaps,
-) -> Option<Vec<u8>> {
-    let mut cur = Cursor::new(payload);
-    advance(&mut cur, 1)?; // reset
-    let count = var_u32(&mut cur)?;
-    let mut out = Vec::with_capacity(payload.len() + 1);
-    wire::write_varint(&mut out, id);
-    out.extend_from_slice(&payload[..cur.position() as usize]);
-    for _ in 0..count {
-        let entry_at = cur.position() as usize;
-        skip_utf(&mut cur)?; // id
-        skip_optional(&mut cur, skip_utf)?; // parent
-        let display_end = if read_u8(&mut cur)? != 0 {
-            skip_display_info(&mut cur, remaps)?;
-            Some(cur.position() as usize)
-        } else {
-            None
-        };
-        for _ in 0..var_u32(&mut cur)? {
-            for _ in 0..var_u32(&mut cur)? {
-                skip_utf(&mut cur)?; // requirement
-            }
-        }
-        advance(&mut cur, 1)?; // sends telemetry
-        let entry_end = cur.position() as usize;
-        advance(&mut cur, 8)?; // x, y
-        match display_end {
-            Some(end) => {
-                out.extend_from_slice(&payload[entry_at..end]);
-                out.extend_from_slice(&payload[entry_end..entry_end + 8]);
-                out.extend_from_slice(&payload[end..entry_end]);
-            }
-            None => out.extend_from_slice(&payload[entry_at..entry_end]),
-        }
-    }
-    out.extend_from_slice(&payload[cur.position() as usize..]);
-    Some(out)
-}
-
 /// Holds a 26.3 `accept_teleportation` back: 26.3 appends the accepted pose
 /// and no longer follows it with a `move_player_pos_rot`
 /// (`ClientPacketListener.handleMovePlayer`), whose pose pomme sends right
@@ -358,27 +309,19 @@ pub(super) fn translate_player_action_777(old_id: u32, payload: &[u8]) -> Vec<Ve
     vec![out]
 }
 
+/// Rewrites `sign_update` for 26.3, which writes the text side after the
+/// lines as a `SignTextSlot` (`ServerboundSignUpdatePacket.STREAM_CODEC`):
+/// back is 0 and front 1, the byte the boolean before the lines was.
 pub(super) fn translate_sign_update_777(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
-    let mut cur = Cursor::new(payload);
-    let Some(()) = advance(&mut cur, 8) else {
+    const POS: usize = 8;
+    let Some((&front, lines)) = payload.get(POS..).and_then(|rest| rest.split_first()) else {
         return Vec::new();
     };
-    let is_front_text = match advance(&mut cur, 1) {
-        Some(()) => payload[8] != 0,
-        None => return Vec::new(),
-    };
-    let lines_start = cur.position() as usize;
-    for _ in 0..4 {
-        if skip_utf(&mut cur).is_none() {
-            return Vec::new();
-        }
-    }
-    let lines_end = cur.position() as usize;
-    let mut out = Vec::with_capacity(payload.len() + 2);
+    let mut out = Vec::with_capacity(payload.len() + 1);
     wire::write_varint(&mut out, old_id);
-    out.extend_from_slice(&payload[..8]);
-    out.extend_from_slice(&payload[lines_start..lines_end]);
-    wire::write_varint(&mut out, u32::from(is_front_text));
+    out.extend_from_slice(&payload[..POS]);
+    out.extend_from_slice(lines);
+    out.push(front);
     vec![out]
 }
 
@@ -417,12 +360,15 @@ pub(super) fn translate_player_chat_777(id: u32, payload: &[u8]) -> Option<Vec<u
 /// `Ingredient.display()` routes direct item lists through it too, which
 /// 26.2 sent as a `composite` of `item` displays. Concrete item ids are
 /// normalized into native 26.2 registry space while named tags keep their id.
+/// An item 26.2 doesn't have is left out of such a list; anywhere else it
+/// sets `missing` and the display reads on, for its caller to drop.
 pub(super) fn copy_slot_display_777(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
     depth: usize,
+    missing: &mut bool,
 ) -> Option<()> {
     use ClientRegistry::SlotDisplay;
     let depth = depth.checked_sub(1)?;
@@ -433,12 +379,13 @@ pub(super) fn copy_slot_display_777(
         if set > 0 {
             let native = RegistryTable::native();
             let item = native.id_of(SlotDisplay, "item")?;
+            let items = native_items(cur, set - 1, remaps)?;
+            *missing |= items.is_empty();
             wire::write_varint(out, native.id_of(SlotDisplay, "composite")?);
-            wire::write_varint(out, set - 1);
-            for _ in 1..set {
+            wire::write_varint(out, items.len() as u32);
+            for source_item in items {
                 wire::write_varint(out, item);
-                let source_item = var_u32(cur)?;
-                wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
+                wire::write_varint(out, source_item);
             }
             return Some(());
         }
@@ -452,24 +399,35 @@ pub(super) fn copy_slot_display_777(
         _ => 0,
     };
     for _ in 0..nested {
-        copy_slot_display_777(cur, out, wire_registries, remaps, depth)?;
+        copy_slot_display_777(cur, out, wire_registries, remaps, depth, missing)?;
     }
     match name {
         "empty" | "any_fuel" | "with_any_potion" | "dyed" | "with_remainder" | "composite" => {}
         "tag" => copy_utf(cur, out)?,
         "item" => {
             let source_item = var_u32(cur)?;
-            wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
+            wire::write_varint(
+                out,
+                native_or_missing(remaps, ClientRegistry::Item, source_item, missing),
+            );
         }
         "item_stack" => {
             let source_item = var_u32(cur)?;
-            wire::write_varint(out, remaps.remap(ClientRegistry::Item, source_item)?);
+            wire::write_varint(
+                out,
+                native_or_missing(remaps, ClientRegistry::Item, source_item, missing),
+            );
             copy_varint(cur, out)?; // count
             copy_component_patch(cur, out, remaps)?;
         }
         "only_with_component" => {
             let component = var_u32(cur)?;
-            let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
+            let native = native_or_missing(
+                remaps,
+                ClientRegistry::DataComponentType,
+                component,
+                missing,
+            );
             wire::write_varint(out, native);
         }
         "smithing_trim" => {
@@ -485,20 +443,42 @@ pub(super) fn copy_slot_display_777(
     Some(())
 }
 
+/// `id`'s native id, or 0 with `missing` set when 26.2 has none.
+fn native_or_missing(
+    remaps: &RegistryRemaps,
+    registry: ClientRegistry,
+    id: u32,
+    missing: &mut bool,
+) -> u32 {
+    remaps.remap(registry, id).unwrap_or_else(|| {
+        *missing = true;
+        0
+    })
+}
+
 /// Copies one 26.3 `RecipeDisplay`, rewriting its slot displays
-/// (`*RecipeDisplay` stream codecs, unchanged from 26.2).
+/// (`*RecipeDisplay` stream codecs, unchanged from 26.2). `missing` as for
+/// [`copy_slot_display_777`].
 pub(super) fn copy_recipe_display_777(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     wire_registries: &RegistryTable,
     remaps: &RegistryRemaps,
+    missing: &mut bool,
 ) -> Option<()> {
     let kind = var_u32(cur)?;
     let name = wire_registries.name_of(ClientRegistry::RecipeDisplay, kind)?;
     wire::write_varint(out, remaps.remap(ClientRegistry::RecipeDisplay, kind)?);
-    let slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: u32| {
+    let mut slots = |cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: u32| {
         (0..n).try_for_each(|_| {
-            copy_slot_display_777(cur, out, wire_registries, remaps, MAX_SLOT_DISPLAY_DEPTH)
+            copy_slot_display_777(
+                cur,
+                out,
+                wire_registries,
+                remaps,
+                MAX_SLOT_DISPLAY_DEPTH,
+                missing,
+            )
         })
     };
     match name {
@@ -527,6 +507,8 @@ pub(super) fn copy_recipe_display_777(
 /// Rewrites `recipe_book_add` from 26.3: each entry's display is rewritten
 /// (see [`copy_slot_display_777`]); the ingredient `HolderSet`s of its
 /// crafting requirements kept their codec and copy through.
+// TODO: an entry built on an item 26.2 doesn't have (poplar wood, wool
+// stairs, cushions) is dropped, so those recipes never reach the book.
 pub(super) fn translate_recipe_book_add_777(
     id: u32,
     payload: &[u8],
@@ -536,19 +518,44 @@ pub(super) fn translate_recipe_book_add_777(
     let mut cur = Cursor::new(payload);
     let mut out = Vec::with_capacity(payload.len() + 64);
     wire::write_varint(&mut out, id);
-    for _ in 0..copy_varint(&mut cur, &mut out)? {
-        copy_varint(&mut cur, &mut out)?; // display id
-        copy_recipe_display_777(&mut cur, &mut out, wire_registries, remaps)?;
-        copy_varint(&mut cur, &mut out)?; // group (optional varint)
-        copy_varint(&mut cur, &mut out)?; // category
-        copy_optional(&mut cur, &mut out, |cur, out| {
-            (0..copy_varint(cur, out)?)
-                .try_for_each(|_| translate_item_holder_set(cur, out, remaps))
+    let mut entries = Vec::with_capacity(payload.len() + 64);
+    let mut kept = 0;
+    for _ in 0..var_u32(&mut cur)? {
+        let start = entries.len();
+        let mut missing = false;
+        copy_varint(&mut cur, &mut entries)?; // display id
+        copy_recipe_display_777(
+            &mut cur,
+            &mut entries,
+            wire_registries,
+            remaps,
+            &mut missing,
+        )?;
+        copy_varint(&mut cur, &mut entries)?; // group (optional varint)
+        copy_varint(&mut cur, &mut entries)?; // category
+        copy_optional(&mut cur, &mut entries, |cur, out| {
+            (0..copy_varint(cur, out)?).try_for_each(|_| {
+                missing |= !translate_item_holder_set(cur, out, remaps)?;
+                Some(())
+            })
         })?;
-        copy_bytes(&mut cur, &mut out, 1)?; // flags
+        copy_bytes(&mut cur, &mut entries, 1)?; // flags
+        keep_or_drop(&mut entries, start, missing, &mut kept);
     }
-    copy_bytes(&mut cur, &mut out, 1)?; // replace
+    copy_bytes(&mut cur, &mut entries, 1)?; // replace
+    wire::write_varint(&mut out, kept);
+    out.extend_from_slice(&entries);
     (cur.position() as usize == payload.len()).then_some(out)
+}
+
+/// Drops the entry written since `start` when it's `missing` an item, else
+/// counts it.
+fn keep_or_drop(entries: &mut Vec<u8>, start: usize, missing: bool, kept: &mut u32) {
+    if missing {
+        entries.truncate(start);
+    } else {
+        *kept += 1;
+    }
 }
 
 /// Rewrites `place_ghost_recipe` from 26.3: container id, then a display.
@@ -562,13 +569,16 @@ pub(super) fn translate_place_ghost_recipe_777(
     let mut out = Vec::with_capacity(payload.len() + 32);
     wire::write_varint(&mut out, id);
     copy_varint(&mut cur, &mut out)?;
-    copy_recipe_display_777(&mut cur, &mut out, wire_registries, remaps)?;
-    (cur.position() as usize == payload.len()).then_some(out)
+    let mut missing = false;
+    copy_recipe_display_777(&mut cur, &mut out, wire_registries, remaps, &mut missing)?;
+    (!missing && cur.position() as usize == payload.len()).then_some(out)
 }
 
 /// Rewrites `update_recipes` from 26.3: the property sets copy through, and
 /// each stonecutter entry's option display is rewritten after its
 /// ingredient `HolderSet` (`SelectableRecipe.SingleInputEntry`).
+// TODO: items 26.2 doesn't have leave the property sets, and a stonecutter
+// entry built on one is dropped.
 pub(super) fn translate_update_recipes_777(
     id: u32,
     payload: &[u8],
@@ -580,20 +590,29 @@ pub(super) fn translate_update_recipes_777(
     wire::write_varint(&mut out, id);
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         copy_utf(&mut cur, &mut out)?; // property set key
-        for _ in 0..copy_varint(&mut cur, &mut out)? {
-            let source_item = var_u32(&mut cur)?;
-            wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, source_item)?);
+        let count = var_u32(&mut cur)?;
+        let items = native_items(&mut cur, count, remaps)?;
+        wire::write_varint(&mut out, items.len() as u32);
+        for item in items {
+            wire::write_varint(&mut out, item);
         }
     }
-    for _ in 0..copy_varint(&mut cur, &mut out)? {
-        translate_item_holder_set(&mut cur, &mut out, remaps)?;
+    let mut entries = Vec::new();
+    let mut kept = 0;
+    for _ in 0..var_u32(&mut cur)? {
+        let start = entries.len();
+        let mut missing = !translate_item_holder_set(&mut cur, &mut entries, remaps)?;
         copy_slot_display_777(
             &mut cur,
-            &mut out,
+            &mut entries,
             wire_registries,
             remaps,
             MAX_SLOT_DISPLAY_DEPTH,
+            &mut missing,
         )?;
+        keep_or_drop(&mut entries, start, missing, &mut kept);
     }
+    wire::write_varint(&mut out, kept);
+    out.extend_from_slice(&entries);
     (cur.position() as usize == payload.len()).then_some(out)
 }

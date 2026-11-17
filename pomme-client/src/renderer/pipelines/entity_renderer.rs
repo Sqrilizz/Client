@@ -1,17 +1,19 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_inventory::ItemStack;
-use azalea_inventory::components::{DataComponentTrait, DyedColor, EquipmentSlot, Equippable};
-use azalea_registry::builtin::EntityKind;
+use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
+use pomme_item::ItemStack;
+use pomme_registry::builtin::EntityKind;
 use serde::Deserialize;
 
 use crate::entity::components::Position;
 use crate::entity::dimensions;
+use crate::net::item_codec::Components;
+use crate::player::default_skin;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::block_lighter::{LightLevels, UNLIT_LANE};
 use crate::renderer::entity_model::{BakedEntityModel, EntityVertex};
+use crate::renderer::pipelines::held_item;
 use crate::renderer::pipelines::lightmap::Lightmap;
 use crate::renderer::pipelines::shaderpack::PackGeometry;
 use crate::renderer::rhi::{self, VertexFormat};
@@ -62,23 +64,9 @@ pub struct ArmorRenderInfo {
     pub dyed_color: Option<u32>,
 }
 
-fn effective_item_component<'a, T: DataComponentTrait>(item: &'a ItemStack) -> Option<Cow<'a, T>> {
-    // Azalea's `get_component` currently falls back to the item default when
-    // the patch entry is an explicit removal (`kind -> None`). Vanilla's
-    // PatchedDataComponentMap keeps that state distinct from an absent patch.
-    if item
-        .component_patch()
-        .iter()
-        .any(|(kind, value)| kind == T::KIND && value.is_none())
-    {
-        return None;
-    }
-    item.get_component::<T>()
-}
-
 pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Option<ArmorRenderInfo> {
     let item = item?;
-    if effective_item_component::<Equippable>(item)?.slot != slot {
+    if item.get_component::<Equippable>()?.slot != slot {
         return None;
     }
     equipment_render_info(item)
@@ -87,10 +75,11 @@ pub fn armor_render_info(item: Option<&ItemStack>, slot: EquipmentSlot) -> Optio
 /// The stack's equipment asset and dye, whatever its `Equippable` slot
 /// (vanilla `LlamaDecorLayer` checks only `assetId().isPresent()`).
 pub fn equipment_render_info(item: &ItemStack) -> Option<ArmorRenderInfo> {
-    let equippable = effective_item_component::<Equippable>(item)?;
+    let equippable = item.get_component::<Equippable>()?;
     let asset_id = equippable.asset_id.as_ref()?.to_string().into();
-    let dyed_color =
-        effective_item_component::<DyedColor>(item).map(|color| color.rgb as u32 & 0x00ff_ffff);
+    let dyed_color = item
+        .get_component::<DyedColor>()
+        .map(|color| color.rgb as u32 & 0x00ff_ffff);
     Some(ArmorRenderInfo {
         asset_id,
         dyed_color,
@@ -138,6 +127,8 @@ pub struct EntityRenderInfo {
     pub player_uuid: Option<uuid::Uuid>,
     /// Indexed like [`ARMOR_SLOTS`].
     pub armor: [Option<ArmorRenderInfo>; 4],
+    /// Vanilla `ArmedEntityRenderState`'s right then left hand items.
+    pub held_items: [Option<(String, pomme_item::ItemStackData)>; 2],
     pub variant_index: u32,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     /// Per-slot overlay texture variant (villager type/profession/level).
@@ -259,6 +250,7 @@ impl Default for EntityRenderInfo {
             entity_kind: EntityKind::Player,
             player_uuid: None,
             armor: Default::default(),
+            held_items: Default::default(),
             variant_index: 0,
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
@@ -1067,7 +1059,6 @@ fn mob_definitions() -> Vec<MobDef> {
         tex_table!("sheep" => "sheep_wool_undercoat");
     const SHEEP_WOOL_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep_wool");
     const SHEEP_BABY_WOOL_TEX: &[&[ResourceId]] = tex_table!("sheep" => "sheep_wool_baby");
-    const PLAYER_TEX: &[&[ResourceId]] = tex_table!("player/wide" => "steve");
     const ZOMBIE_TEX: &[&[ResourceId]] = tex_table!("zombie" => "zombie");
     const ZOMBIE_BABY_TEX: &[&[ResourceId]] = tex_table!("zombie" => "zombie_baby");
     const HUSK_TEX: &[&[ResourceId]] = tex_table!("zombie" => "husk");
@@ -1610,11 +1601,19 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Player,
             anim: AnimationType::Humanoid,
-            // Variant 0 = classic (wide) arms, 1 = slim; picked per player from
-            // the skin's model metadata (effective_variant_index).
+            // `DefaultPlayerSkin`'s skins in its order, slim then wide;
+            // picked per player (effective_variant_index).
             adult: vec![
-                opaque(entity_model::bake_player_model(false), PLAYER_TEX, 64),
-                opaque(entity_model::bake_player_model(true), PLAYER_TEX, 64),
+                opaque(
+                    entity_model::bake_player_model(true),
+                    &default_skin::TEXTURES[..default_skin::SLIM_COUNT],
+                    64,
+                ),
+                opaque(
+                    entity_model::bake_player_model(false),
+                    &default_skin::TEXTURES[default_skin::SLIM_COUNT..],
+                    64,
+                ),
             ],
             baby: None,
             adult_overlays: vec![],
@@ -2553,11 +2552,19 @@ impl EntityRenderer {
         self.player_skin(info).map_or(fallback, |skin| skin.set)
     }
 
-    /// Players pick their model variant (0 = wide, 1 = slim) from the fetched
-    /// skin's metadata rather than the caller-supplied index.
+    /// A player draws its fetched skin on a variant of that skin's model, or
+    /// else `DefaultPlayerSkin.get(uuid)`'s variant.
     fn effective_variant_index(&self, info: &EntityRenderInfo) -> u32 {
-        self.player_skin(info)
-            .map_or(info.variant_index, |skin| skin.slim as u32)
+        if info.entity_kind != EntityKind::Player {
+            return info.variant_index;
+        }
+        let index = match (self.player_skin(info), info.player_uuid) {
+            (Some(skin), _) if skin.slim => 0,
+            (Some(_), _) => default_skin::SLIM_COUNT,
+            (None, Some(uuid)) => default_skin::index(&uuid),
+            (None, None) => default_skin::STEVE,
+        };
+        index as u32
     }
 
     /// Texture set and tint of each drawn equipment layer, in submit order.
@@ -3017,6 +3024,48 @@ impl EntityRenderer {
         } else {
             base
         }
+    }
+
+    /// Vanilla `ItemInHandLayer.submitArmWithItem` up to the item's display
+    /// transform: the right then left hand, relative to `anchor`, for the
+    /// kinds whose renderer (`HumanoidMobRenderer`) has the layer. Their arm
+    /// pose stays `EMPTY` while holding an item.
+    // TODO: players (`PlayerItemInHandLayer`, with the `ITEM` arm pose), the
+    // aggressive skeleton's `BOW_AND_ARROW` pose, and the renderers with
+    // their own item layers (witch, fox, panda, allay, dolphin).
+    pub fn hand_poses(
+        &self,
+        info: &EntityRenderInfo,
+        anchor: glam::DVec3,
+    ) -> Option<[glam::Mat4; 2]> {
+        if !matches!(
+            info.entity_kind,
+            EntityKind::Zombie
+                | EntityKind::Husk
+                | EntityKind::Drowned
+                | EntityKind::ZombieVillager
+                | EntityKind::Skeleton
+                | EntityKind::Stray
+                | EntityKind::Bogged
+        ) {
+            return None;
+        }
+        let entry = self.mobs.get(&info.entity_kind)?;
+        let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
+        let parts = variant.model.compute_part_transforms(&self.compute_anim(
+            entry.anim,
+            &variant.model,
+            info,
+        ));
+        let entity = Self::entity_matrix(info, anchor);
+        // Part frames are vanilla's with Y negated (the bake negates it), so
+        // the layer's steps go through the mirror back to vanilla's frame.
+        let y_mirror = glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0));
+        let hand = |name: &str, right_arm: bool| {
+            let arm = variant.model.parts.iter().position(|p| p.name == name)?;
+            Some(entity * parts[arm] * y_mirror * held_item::arm_to_item(right_arm, info.is_baby))
+        };
+        Some([hand("right_arm", true)?, hand("left_arm", false)?])
     }
 
     /// Draws `entities` for the camera, or into a shader pack's shadow maps
@@ -4175,14 +4224,15 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use azalea_inventory::ItemStack;
     use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
-    use azalea_registry::builtin::ItemKind;
+    use pomme_item::ItemStack;
+    use pomme_registry::builtin::ItemKind;
 
     use super::{
         ArmorDye, EquipmentClientInfoJson, OverlayKind, Route, Visibility, armor_layer_defs,
         armor_render_info, body_route, layer_route,
     };
+    use crate::net::item_codec::Components;
 
     /// `LlamaDecorLayer` takes any equippable asset, whatever its slot.
     #[test]
@@ -4339,7 +4389,7 @@ mod tests {
         assert_eq!(layers[1].dye, ArmorDye::None);
     }
 
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::builtin::EntityKind;
 
     use super::{EntityRenderInfo, EntityRenderer, PLAYER_MODEL_SCALE};
 
@@ -4481,7 +4531,7 @@ mod tests {
 
     #[test]
     fn death_fall_matches_vanilla_boundaries_and_flip_overrides() {
-        use azalea_registry::builtin::EntityKind;
+        use pomme_registry::builtin::EntityKind;
 
         assert_eq!(super::death_fall_degrees(0.0, EntityKind::Zombie), 0.0);
         assert_eq!(super::death_fall_degrees(1.0, EntityKind::Zombie), 0.0);

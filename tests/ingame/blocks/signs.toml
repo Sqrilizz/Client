@@ -1,7 +1,6 @@
 # Sign text: standing signs in black, a red dye and glowing red, a hanging
-# sign with styled lines, and a wall sign (hidden for now behind the standing
-# board Pomme also draws there); then a sign placed by hand, its editor typed
-# into, and the text the server took copied to a second sign.
+# sign with styled lines, and a wall sign; then a sign placed by hand, its
+# editor typed into, and the text the server took copied to a second sign.
 
 [[step]]
 wait_ms = 2000
@@ -14,9 +13,6 @@ chat = "/gamerule advance_time false"
 
 [[step]]
 chat = "/time set 6000"
-
-[[step]]
-deterministic = true
 
 [[step]]
 chat = "/tp @s 200.5 -60 0.5 0 0"

@@ -12,6 +12,7 @@ use super::{NetworkEvent, Weather};
 use crate::attribute::{
     AttributeKind, AttributeModifier, AttributeModifierOperation, AttributeSnapshot,
 };
+use crate::chat_component::ComponentText;
 
 /// `ClientboundGameEventPacket.Type` ids the client acts on.
 const START_RAINING: u8 = 1;
@@ -118,6 +119,23 @@ fn event(packet: PlayerPacket) -> Option<NetworkEvent> {
         PlayerPacket::Cooldown { group, duration } => {
             NetworkEvent::ItemCooldown { group, duration }
         }
+        PlayerPacket::Camera { entity } => NetworkEvent::SetCamera { id: entity },
+        PlayerPacket::MoveVehicle {
+            position,
+            y_rot,
+            x_rot,
+        } => NetworkEvent::MoveVehicle {
+            position,
+            y_rot_deg: y_rot,
+            x_rot_deg: x_rot,
+        },
+        PlayerPacket::OpenSignEditor {
+            pos: (x, y, z),
+            is_front_text,
+        } => NetworkEvent::OpenSignEditor {
+            pos: azalea_core::position::BlockPos::new(x, y, z),
+            is_front_text,
+        },
     })
 }
 

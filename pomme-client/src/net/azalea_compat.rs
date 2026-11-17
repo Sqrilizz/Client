@@ -9,9 +9,6 @@ use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::Holder;
-use azalea_registry::builtin::SoundEvent;
-use azalea_registry::identifier::Identifier;
 use glam::DVec3;
 use pomme_protocol::chunk::{self, ChunkPacket};
 use pomme_protocol::container::{self, ContainerPacket};
@@ -22,6 +19,12 @@ use pomme_protocol::player_info::{self, PlayerInfoPacket};
 use pomme_protocol::scoreboard::{self, NumberFormat, ObjectiveMethod, ScoreboardPacket};
 use pomme_protocol::sound::{self, SoundPacket};
 use pomme_protocol::wire;
+use pomme_registry::Holder;
+use pomme_registry::builtin::SoundEvent;
+use pomme_registry::identifier::Identifier;
+
+use super::RawRead;
+use crate::chat_component::ComponentText;
 
 fn table_id(phase: Phase, dir: Direction, name: &str) -> u32 {
     PacketTable::native().id(phase, dir, name).unwrap()
@@ -41,8 +44,8 @@ fn native_matches_azalea() {
 #[test]
 fn entity_dimensions_match_azalea() {
     use azalea_entity::dimensions::EntityDimensions as AzaleaDimensions;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::EntityKind;
 
     use crate::entity::dimensions::EntityDimensions;
 
@@ -141,6 +144,313 @@ fn chat_encoders_round_trip_through_azalea() {
         panic!("expected chat_ack");
     };
     assert_eq!(ack.messages, 300);
+}
+
+#[test]
+fn handshake_and_status_match_azalea() {
+    use azalea_protocol::packets::ClientIntention;
+    use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+    use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
+    use azalea_protocol::packets::status::c_pong_response::ClientboundPongResponse;
+    use azalea_protocol::packets::status::c_status_response::ClientboundStatusResponse;
+    use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
+    use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
+    use azalea_protocol::packets::status::{ClientboundStatusPacket, ServerboundStatusPacket};
+    use azalea_protocol::write::serialize_packet;
+    use pomme_protocol::status::{self, ClientIntent, Intention, StatusPacket};
+
+    let intention = Intention {
+        protocol_version: 776,
+        host: "play.example.org".into(),
+        port: 25565,
+        intent: ClientIntent::Transfer,
+    };
+    let azalea = ServerboundHandshakePacket::Intention(ServerboundIntention {
+        protocol_version: 776,
+        hostname: "play.example.org".into(),
+        port: 25565,
+        intention: ClientIntention::Transfer,
+    });
+    assert_eq!(*serialize_packet(&azalea).unwrap(), intention.encode());
+    assert_eq!(
+        *serialize_packet(&ServerboundStatusPacket::StatusRequest(
+            ServerboundStatusRequest {}
+        ))
+        .unwrap(),
+        status::encode_status_request()
+    );
+    assert_eq!(
+        *serialize_packet(&ServerboundStatusPacket::PingRequest(
+            ServerboundPingRequest { time: 77 }
+        ))
+        .unwrap(),
+        status::encode_ping_request(77)
+    );
+
+    let pong = serialize_packet(&ClientboundStatusPacket::PongResponse(
+        ClientboundPongResponse { time: 77 },
+    ))
+    .unwrap();
+    assert_eq!(status::read_frame(&pong), Ok(StatusPacket::Pong(77)));
+
+    // The same payload through both readers.
+    let json = r#"{"description":{"text":"hi"},"players":{"max":20,"online":3,"sample":[]},
+        "version":{"name":"26.2","protocol":776}}"#;
+    let mut frame = vec![0];
+    wire::write_utf(&mut frame, json);
+    let ClientboundStatusPacket::StatusResponse(ClientboundStatusResponse {
+        players, version, ..
+    }) = azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frame[..])).unwrap()
+    else {
+        panic!("not a status response");
+    };
+    let Ok(StatusPacket::Response(ours)) = status::read_frame(&frame) else {
+        panic!("not a status response");
+    };
+    let (ours_players, ours_version) = (ours.players.unwrap(), ours.version.unwrap());
+    assert_eq!(
+        (players.online, players.max),
+        (ours_players.online, ours_players.max)
+    );
+    assert_eq!(
+        (version.name, version.protocol),
+        (ours_version.name, ours_version.protocol)
+    );
+}
+
+#[test]
+fn configuration_packets_match_azalea() {
+    use azalea_protocol::packets::config::{
+        ClientboundConfigPacket, ServerboundConfigPacket, c_cookie_request, c_finish_configuration,
+        c_keep_alive, c_ping, c_registry_data, c_select_known_packs, s_cookie_response,
+        s_finish_configuration, s_keep_alive, s_pong,
+    };
+    use azalea_protocol::write::serialize_packet;
+    use pomme_protocol::configuration::{ConfigPacket, ServerboundConfig};
+    use pomme_protocol::serverbound::GamePacket;
+
+    use super::config_wire::{self, ConfigFrame};
+
+    let key = Identifier::new("minecraft:session");
+    let common = |packet: GamePacket| packet.encode_in(Phase::Configuration).unwrap();
+    let pairs = [
+        (
+            ServerboundConfigPacket::FinishConfiguration(
+                s_finish_configuration::ServerboundFinishConfiguration {},
+            ),
+            ServerboundConfig::FinishConfiguration.encode(),
+        ),
+        (
+            ServerboundConfigPacket::CookieResponse(s_cookie_response::ServerboundCookieResponse {
+                key: key.clone(),
+                payload: None,
+            }),
+            ServerboundConfig::CookieResponse {
+                key: key.to_string(),
+                payload: None,
+            }
+            .encode(),
+        ),
+        (
+            ServerboundConfigPacket::KeepAlive(s_keep_alive::ServerboundKeepAlive { id: 77 }),
+            common(GamePacket::KeepAlive { id: 77 }),
+        ),
+        (
+            ServerboundConfigPacket::Pong(s_pong::ServerboundPong { id: 5 }),
+            common(GamePacket::Pong { id: 5 }),
+        ),
+    ];
+    for (azalea, ours) in pairs {
+        assert_eq!(*serialize_packet(&azalea).unwrap(), ours, "{azalea:?}");
+    }
+
+    let read = |packet: ClientboundConfigPacket| {
+        config_wire::read(&serialize_packet(&packet).unwrap())
+            .unwrap()
+            .unwrap()
+    };
+    let mut plains = simdnbt::owned::NbtCompound::new();
+    plains.insert("has_precipitation", simdnbt::owned::NbtTag::Byte(1));
+    let registry = read(ClientboundConfigPacket::RegistryData(
+        c_registry_data::ClientboundRegistryData {
+            registry_id: Identifier::new("minecraft:worldgen/biome"),
+            entries: vec![
+                (Identifier::new("minecraft:plains"), Some(plains)),
+                (Identifier::new("minecraft:desert"), None),
+            ],
+        },
+    ));
+    let ConfigFrame::Config(ConfigPacket::RegistryData(data)) = registry else {
+        panic!("not registry data");
+    };
+    assert_eq!(data.registry, "minecraft:worldgen/biome");
+    let entries: Vec<_> = data
+        .entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry.data.is_some()))
+        .collect();
+    assert_eq!(
+        entries,
+        [("minecraft:plains", true), ("minecraft:desert", false)]
+    );
+
+    let pack =
+        |namespace: &str| azalea_protocol::packets::config::s_select_known_packs::KnownPack {
+            namespace: namespace.into(),
+            id: "core".into(),
+            version: "26.2".into(),
+        };
+    let offered = read(ClientboundConfigPacket::SelectKnownPacks(
+        c_select_known_packs::ClientboundSelectKnownPacks {
+            known_packs: vec![pack("minecraft"), pack("pomme")],
+        },
+    ));
+    assert!(matches!(
+        offered,
+        ConfigFrame::Config(ConfigPacket::SelectKnownPacks(packs))
+            if packs.len() == 2 && packs[1].namespace == "pomme" && packs[1].version == "26.2"
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::FinishConfiguration(
+            c_finish_configuration::ClientboundFinishConfiguration
+        )),
+        ConfigFrame::Config(ConfigPacket::FinishConfiguration)
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::CookieRequest(
+            c_cookie_request::ClientboundCookieRequest { key }
+        )),
+        ConfigFrame::Config(ConfigPacket::CookieRequest(key)) if key == "minecraft:session"
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::KeepAlive(
+            c_keep_alive::ClientboundKeepAlive { id: 77 }
+        )),
+        ConfigFrame::Lifecycle(LifecyclePacket::KeepAlive(77))
+    ));
+    assert!(matches!(
+        read(ClientboundConfigPacket::Ping(c_ping::ClientboundPing {
+            id: 5
+        })),
+        ConfigFrame::Lifecycle(LifecyclePacket::Ping(5))
+    ));
+}
+
+#[test]
+fn login_packets_match_azalea() {
+    use azalea_protocol::packets::login::{
+        ClientboundLoginPacket, ServerboundLoginPacket, c_cookie_request, c_custom_query, c_hello,
+        c_login_compression, c_login_finished, s_cookie_response, s_custom_query_answer, s_hello,
+        s_key, s_login_acknowledged,
+    };
+    use azalea_protocol::write::serialize_packet;
+    use pomme_protocol::login::{self, LoginPacket, ServerboundLogin};
+
+    let uuid = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+    let key = Identifier::new("minecraft:session");
+    let pairs = [
+        (
+            ServerboundLoginPacket::Hello(s_hello::ServerboundHello {
+                name: "Steve".into(),
+                profile_id: uuid,
+            }),
+            ServerboundLogin::Hello {
+                name: "Steve".into(),
+                profile_id: uuid.as_u128(),
+            },
+        ),
+        (
+            ServerboundLoginPacket::Key(s_key::ServerboundKey {
+                key_bytes: vec![1, 2, 3],
+                encrypted_challenge: vec![4, 5],
+            }),
+            ServerboundLogin::Key {
+                key: vec![1, 2, 3],
+                encrypted_challenge: vec![4, 5],
+            },
+        ),
+        (
+            ServerboundLoginPacket::CustomQueryAnswer(
+                s_custom_query_answer::ServerboundCustomQueryAnswer {
+                    transaction_id: 300,
+                    data: None,
+                },
+            ),
+            ServerboundLogin::CustomQueryAnswer {
+                transaction_id: 300,
+            },
+        ),
+        (
+            ServerboundLoginPacket::LoginAcknowledged(
+                s_login_acknowledged::ServerboundLoginAcknowledged {},
+            ),
+            ServerboundLogin::LoginAcknowledged,
+        ),
+        (
+            ServerboundLoginPacket::CookieResponse(s_cookie_response::ServerboundCookieResponse {
+                key: key.clone(),
+                payload: None,
+            }),
+            ServerboundLogin::CookieResponse {
+                key: key.to_string(),
+                payload: None,
+            },
+        ),
+    ];
+    for (azalea, ours) in pairs {
+        assert_eq!(
+            *serialize_packet(&azalea).unwrap(),
+            ours.encode(),
+            "{}",
+            ours.name()
+        );
+    }
+
+    let read = |packet: ClientboundLoginPacket| {
+        login::read_frame(&serialize_packet(&packet).unwrap()).unwrap()
+    };
+    let hello = read(ClientboundLoginPacket::Hello(c_hello::ClientboundHello {
+        server_id: "id".into(),
+        public_key: vec![1, 2],
+        challenge: vec![3],
+        should_authenticate: true,
+    }));
+    assert!(matches!(hello, LoginPacket::Hello(h)
+        if h.server_id == "id" && h.public_key == [1, 2] && h.challenge == [3]
+            && h.should_authenticate));
+    let finished = read(ClientboundLoginPacket::LoginFinished(
+        c_login_finished::ClientboundLoginFinished {
+            game_profile: azalea_auth::game_profile::GameProfile::new(uuid, "Steve".into()),
+            session_id: uuid,
+        },
+    ));
+    assert!(matches!(finished, LoginPacket::Finished(f)
+        if f.profile.id == uuid.as_u128() && f.profile.name == "Steve"
+            && f.session_id == uuid.as_u128()));
+    assert_eq!(
+        read(ClientboundLoginPacket::LoginCompression(
+            c_login_compression::ClientboundLoginCompression {
+                compression_threshold: 256
+            }
+        )),
+        LoginPacket::Compression(256)
+    );
+    assert_eq!(
+        read(ClientboundLoginPacket::CustomQuery(
+            c_custom_query::ClientboundCustomQuery {
+                transaction_id: 7,
+                identifier: key.clone(),
+                data: vec![1, 2, 3].into(),
+            }
+        )),
+        LoginPacket::CustomQuery { transaction_id: 7 }
+    );
+    assert_eq!(
+        read(ClientboundLoginPacket::CookieRequest(
+            c_cookie_request::ClientboundCookieRequest { key }
+        )),
+        LoginPacket::CookieRequest("minecraft:session".into())
+    );
 }
 
 #[test]
@@ -577,9 +887,6 @@ fn translate_and_read<P>(protocol: i32, old: Vec<u8>, name: &str, read: RawRead<
 }
 
 /// A pomme-protocol decoder (`chunk::read`, `block::read`, …).
-type RawRead<P> =
-    fn(&str, &mut pomme_protocol::codec::Reader) -> Option<pomme_protocol::codec::DecodeResult<P>>;
-
 /// A native 26.2 game frame for packet `name`, decoded with `read`.
 fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
     let mut r = pomme_protocol::codec::Reader::new(frame);
@@ -592,20 +899,12 @@ fn read_native_frame<P>(frame: &[u8], name: &str, read: RawRead<P>) -> P {
     decoded
 }
 
-/// `translate_and_decode` plus the id remap the connection applies next, for
-/// packets whose frame rewrite leaves item ids in the wire version's space.
-fn translate_decode_and_remap(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
-    let mut packet = translate_and_decode(protocol, old);
-    assert!(translation_for(protocol).remap_inbound(&mut packet));
-    packet
-}
-
 /// An item 765 and 26.2 number differently (27 against 54), so a stack that
 /// never gets remapped decodes as the wrong item rather than passing by
 /// identity.
 const SHIFTED_ITEM: u8 = 27;
-const SHIFTED_ITEM_KIND: azalea_registry::builtin::ItemKind =
-    azalea_registry::builtin::ItemKind::GrassBlock;
+const SHIFTED_ITEM_KIND: pomme_registry::builtin::ItemKind =
+    pomme_registry::builtin::ItemKind::GrassBlock;
 
 /// Exactly the joinable non-native protocols build a translation: a version
 /// with embedded tables but no `TRANSLATED` entry (the staging state while
@@ -666,7 +965,7 @@ fn translate_game_login_26_1() {
     use azalea_core::game_type::{GameMode, OptionalGameType};
     use azalea_protocol::packets::game::ClientboundGamePacket;
     use azalea_protocol::packets::game::c_login::ClientboundLogin;
-    use azalea_registry::DataRegistry;
+    use pomme_registry::DataRegistry;
 
     let packet = ClientboundGamePacket::Login(ClientboundLogin {
         player_id: MinecraftEntityId(7),
@@ -679,7 +978,7 @@ fn translate_game_login_26_1() {
         show_death_screen: true,
         do_limited_crafting: false,
         common: azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-            dimension_type: azalea_registry::data::DimensionKind::new_raw(0),
+            dimension_type: pomme_registry::data::DimensionKind::new_raw(0),
             dimension: "minecraft:overworld".into(),
             seed: 42,
             game_type: GameMode::Survival,
@@ -791,10 +1090,10 @@ fn translate_set_player_team_26_1_reset_color() {
 
 /// Every native registry id must match the runtime enum used by remapping.
 #[test]
-fn registry_table_matches_azalea() {
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::*;
+fn registry_table_matches_the_registry_enums() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::*;
 
     let mut mismatches = Vec::new();
     macro_rules! check {
@@ -808,9 +1107,10 @@ fn registry_table_matches_azalea() {
             for (id, name) in names.iter().enumerate() {
                 let value = $kind::from_u32(id as u32).expect("builtin id");
                 assert_eq!(value.to_u32(), id as u32);
-                let azalea = value.to_str().trim_start_matches("minecraft:");
-                if azalea != name {
-                    mismatches.push((stringify!($kind), azalea.to_owned(), name.clone()));
+                // The table drops the default namespace, as `toShortString`.
+                let entry = value.to_str().trim_start_matches("minecraft:");
+                if entry != name {
+                    mismatches.push((stringify!($kind), entry.to_owned(), name.clone()));
                 }
             }
         }};
@@ -837,20 +1137,7 @@ fn registry_table_matches_azalea() {
             ClientRegistry::SoundEvent => check!(SoundEvent, SoundEvent),
         }
     }
-    // azalea names brigadier's own argument types in the minecraft namespace;
-    // vanilla registers them as brigadier:* (ArgumentTypeInfos.bootstrap).
-    let brigadier = ["bool", "float", "double", "integer", "long", "string"];
-    let expected: Vec<_> = brigadier
-        .iter()
-        .map(|t| {
-            (
-                "CommandArgumentKind",
-                t.to_string(),
-                format!("brigadier:{t}"),
-            )
-        })
-        .collect();
-    assert_eq!(mismatches, expected);
+    assert_eq!(mismatches, []);
 }
 
 /// A 26.1 `add_entity`'s type id comes out as the wrong kind in 26.2's
@@ -858,8 +1145,8 @@ fn registry_table_matches_azalea() {
 /// the raw path applies fixes it.
 #[test]
 fn remap_add_entity_26_1() {
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::EntityKind;
 
     // 26.1 tadpole is id 130, which 26.2 numbers as sulfur_cube.
     assert_eq!(EntityKind::from_u32(130), Some(EntityKind::SulfurCube));
@@ -871,44 +1158,94 @@ fn remap_add_entity_26_1() {
     );
 }
 
-/// azalea's typed encoder always writes 26.2 component-type ids, so on a
-/// version without an item grammar a creative stack whose patch touches a
-/// shifted id is cleared wholesale outbound; unshifted components survive.
+/// A creative stack's component values can't be rewritten on a version
+/// without an item grammar, so a patch touching a component that version
+/// numbers differently is cleared wholesale outbound; unshifted ones survive.
 #[test]
 fn strip_creative_components_774() {
-    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
-    use azalea_protocol::packets::game::ServerboundGamePacket;
-    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-    use azalea_registry::builtin::{DataComponentKind, ItemKind};
+    use pomme_protocol::item::{ComponentPatch, ItemStack};
+    use pomme_protocol::serverbound::GamePacket;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let remap = |kind: DataComponentKind| {
-        let mut patch = DataComponentPatch::default();
-        // A removal marker carries no typed value, making it the safe way to
-        // put an arbitrary kind in the otherwise-opaque patch.
-        unsafe { patch.unchecked_insert_component(kind, None) };
-        let mut packet =
-            ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
-                slot_num: 36,
-                item_stack: ItemStack::Present(ItemStackData {
-                    kind: ItemKind::Stone,
-                    count: 1,
-                    component_patch: patch,
-                }),
-            });
+    let component = |name| {
+        registry_id(
+            RegistryTable::native(),
+            ClientRegistry::DataComponentType,
+            name,
+        )
+    };
+    let remap = |name| {
+        let mut packet = GamePacket::SetCreativeModeSlot {
+            slot: 36,
+            stack: Some(ItemStack {
+                item: registry_id(RegistryTable::native(), ClientRegistry::Item, "stone"),
+                count: 1,
+                patch: ComponentPatch {
+                    added: Vec::new(),
+                    removed: vec![component(name)],
+                },
+            }),
+        };
         translation_for(774).remap_outbound(&mut packet);
-        let ServerboundGamePacket::SetCreativeModeSlot(p) = packet else {
+        let GamePacket::SetCreativeModeSlot { stack, .. } = packet else {
             unreachable!()
         };
-        let ItemStack::Present(data) = p.item_stack else {
-            panic!("stack cleared");
-        };
-        data.component_patch
+        stack.expect("stack cleared").patch
     };
 
-    // max_stack_size (id 1) is numbered the same in 1.21.11: kept.
-    assert_eq!(remap(DataComponentKind::MaxStackSize).iter().count(), 1);
-    // lock (79 in 26.2, 76 in 1.21.11) is shifted: the patch is cleared.
-    assert_eq!(remap(DataComponentKind::Lock).iter().count(), 0);
+    // max_stack_size is numbered the same in 1.21.11: kept.
+    assert_eq!(
+        remap("max_stack_size").removed,
+        [component("max_stack_size")]
+    );
+    // lock is shifted in 1.21.11: the patch is cleared.
+    assert_eq!(remap("lock"), ComponentPatch::default());
+}
+
+/// 1.20.5 to 1.21.4 read a creative stack's component values without the
+/// length prefix 1.21.5 added; later versions keep it.
+#[test]
+fn creative_slot_component_values_lose_their_length_769() {
+    use pomme_protocol::item::{ComponentPatch, ItemStack};
+    use pomme_protocol::serverbound::GamePacket;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let native = RegistryTable::native();
+    let stone = registry_id(native, ClientRegistry::Item, "stone") as u8;
+    let size = registry_id(native, ClientRegistry::DataComponentType, "max_stack_size") as u8;
+    let frame = |protocol| {
+        let mut packet = GamePacket::SetCreativeModeSlot {
+            slot: 36,
+            stack: Some(ItemStack {
+                item: u32::from(stone),
+                count: 2,
+                patch: ComponentPatch {
+                    added: vec![(u32::from(size), [16].into())],
+                    removed: Vec::new(),
+                },
+            }),
+        };
+        let translation = translation_for(protocol);
+        translation.remap_outbound(&mut packet);
+        let frames = translation.translate_outbound_game_frame(packet.encode());
+        let [frame] = &frames[..] else {
+            panic!("one frame");
+        };
+        let mut pos = 0;
+        assert_eq!(
+            wire::read_varint(frame, &mut pos),
+            Some(old_id(
+                protocol,
+                Direction::Serverbound,
+                "set_creative_mode_slot"
+            ))
+        );
+        frame[pos..].to_vec()
+    };
+    // Slot, count, item, one added and no removed components, then the
+    // added one's id and value (16).
+    assert_eq!(frame(769), [0, 36, 2, stone, 1, 0, size, 16]);
+    assert_eq!(frame(774), [0, 36, 2, stone, 1, 0, size, 1, 16]);
 }
 
 /// 26.1's game ids match 26.2's, but its item grammar still routes its
@@ -1939,7 +2276,7 @@ fn translate_disguised_chat_765() {
 /// The registry id behind a decoded chat-type holder; a direct (inline) one
 /// means the holder bump was missed.
 fn chat_kind(bound: &azalea_protocol::packets::game::c_player_chat::ChatTypeBound) -> u32 {
-    use azalea_registry::{Holder, Registry};
+    use pomme_registry::{Holder, Registry};
     match &bound.chat_type {
         Holder::Reference(kind) => kind.to_u32(),
         Holder::Direct(_) => panic!("chat type decoded as an inline value"),
@@ -1957,25 +2294,6 @@ fn translate_player_chat_769() {
     assert_eq!(p.global_index, 0);
     assert_eq!(p.index, 3);
     assert_eq!(p.body.content, "hi");
-}
-
-/// 1.21.5 appended `showAdvancements` to `update_advancements`; the shim
-/// synthesizes true.
-#[test]
-fn translate_update_advancements_769() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(769, Direction::Clientbound, "update_advancements"),
-    );
-    old.push(1); // reset
-    old.extend_from_slice(&[0, 0, 0]); // no added/removed/progress
-
-    let ClientboundGamePacket::UpdateAdvancements(p) = translate_and_decode(769, old) else {
-        panic!("wrong packet");
-    };
-    assert!(p.reset);
-    assert!(p.show_advancements);
 }
 
 /// A 26.2 `container_click` carries hashed stacks; 1.21.4 wants full item
@@ -2307,9 +2625,6 @@ fn translate_move_player_flags_767() {
 /// get it stripped in the game phase and in configuration.
 #[test]
 fn strip_particle_status_767() {
-    use azalea_protocol::packets::config::{ServerboundConfigPacket, s_client_information};
-    use azalea_protocol::packets::game::s_client_information as game_client_information;
-
     let information = super::client_information(
         8,
         crate::ui::chat::ChatOptions::default(),
@@ -2326,14 +2641,8 @@ fn strip_particle_status_767() {
         out
     };
 
-    let game = Vec::from(
-        azalea_protocol::write::serialize_packet(&ServerboundGamePacket::ClientInformation(
-            game_client_information::ServerboundClientInformation {
-                client_information: information.clone(),
-            },
-        ))
-        .unwrap(),
-    );
+    let information = pomme_protocol::serverbound::GamePacket::ClientInformation(information);
+    let game = information.encode();
     for protocol in [767, 763] {
         let old = old_id(protocol, Direction::Serverbound, "client_information");
         assert_eq!(
@@ -2343,12 +2652,7 @@ fn strip_particle_status_767() {
         );
     }
 
-    let config = Vec::from(
-        azalea_protocol::write::serialize_packet(&ServerboundConfigPacket::ClientInformation(
-            s_client_information::ServerboundClientInformation { information },
-        ))
-        .unwrap(),
-    );
+    let config = information.encode_in(Phase::Configuration).unwrap();
     for protocol in [767, 764] {
         let old = config_id(protocol, Direction::Serverbound, "client_information");
         assert_eq!(
@@ -2372,18 +2676,26 @@ fn translate_update_attributes_766() {
     wire::write_varint(&mut old, 1); // one attribute
     wire::write_varint(&mut old, 16); // generic.max_health (766 space)
     old.extend_from_slice(&20.0f64.to_be_bytes()); // base
-    wire::write_varint(&mut old, 1); // one modifier
+    wire::write_varint(&mut old, 2); // two modifiers
     old.extend_from_slice(&[0xAB; 16]); // uuid
     old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
     wire::write_varint(&mut old, 0); // operation
+    // `SPEED_MODIFIER_SPRINTING_UUID`, which 1.21 names.
+    old.extend_from_slice(&0x662A6B8D_DA3E_4C1C_8813_96EA6097278D_u128.to_be_bytes());
+    old.extend_from_slice(&0.3f64.to_be_bytes());
+    wire::write_varint(&mut old, 2);
 
     let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(766, old) else {
         panic!("wrong packet");
     };
+    assert_eq!(
+        p.values[0].modifiers[1].id.to_string(),
+        "minecraft:sprinting"
+    );
     assert_eq!(p.values.len(), 1);
     assert_eq!(
         p.values[0].attribute,
-        azalea_registry::builtin::Attribute::MaxHealth
+        pomme_registry::builtin::Attribute::MaxHealth
     );
     assert_eq!(p.values[0].base, 20.0);
     let modifier = &p.values[0].modifiers[0];
@@ -2459,7 +2771,7 @@ fn translate_container_set_content_765() {
         ContainerPacket::Content {
             container_id: 1,
             state_id: 2,
-            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            items: vec![pomme_stack(pomme_registry::builtin::ItemKind::Stone, 3)],
             carried: None,
         }
     );
@@ -2467,10 +2779,10 @@ fn translate_container_set_content_765() {
 
 /// `count` of `kind` with no components, as pomme decodes it.
 fn pomme_stack(
-    kind: azalea_registry::builtin::ItemKind,
+    kind: pomme_registry::builtin::ItemKind,
     count: i32,
 ) -> Option<pomme_protocol::item::ItemStack> {
-    use azalea_registry::Registry;
+    use pomme_registry::Registry;
 
     Some(pomme_protocol::item::ItemStack {
         item: kind.to_u32(),
@@ -2507,12 +2819,12 @@ fn translate_set_equipment_765() {
 }
 
 /// A wire-version item id as the native item, as `container_wire` remaps it.
-fn native_item(protocol: i32, id: u32) -> Option<azalea_registry::builtin::ItemKind> {
-    use azalea_registry::Registry;
+fn native_item(protocol: i32, id: u32) -> Option<pomme_registry::builtin::ItemKind> {
+    use pomme_registry::Registry;
 
     let native =
         translation_for(protocol).remap_to_native(pomme_protocol::ClientRegistry::Item, id);
-    native.and_then(azalea_registry::builtin::ItemKind::from_u32)
+    native.and_then(pomme_registry::builtin::ItemKind::from_u32)
 }
 
 /// The `-2` sentinel's stack, split into `set_player_inventory`, keeps its
@@ -2542,9 +2854,9 @@ fn translate_set_player_inventory_remaps_765() {
 /// below the native one.
 #[test]
 fn remap_menu_763() {
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::MenuKind;
     use pomme_protocol::{ClientRegistry, RegistryTable};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::MenuKind;
 
     let anvil = RegistryTable::for_protocol(763)
         .unwrap()
@@ -2579,13 +2891,12 @@ fn translate_merchant_offers_765() {
     wire::write_varint(&mut old, 30); // villager xp
     old.extend_from_slice(&[1, 1]); // show progress, can restock
 
-    let ClientboundGamePacket::MerchantOffers(p) = translate_decode_and_remap(765, old) else {
+    let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(765, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.container_id, 1);
     let offer = &p.offers[0];
     assert_eq!(offer.base_cost_a.count, 3);
-    assert_eq!(offer.base_cost_a.item, SHIFTED_ITEM_KIND);
     assert!(offer.cost_b.is_none());
     assert_eq!(offer.uses, 5);
     assert_eq!(offer.max_uses, 12);
@@ -2645,7 +2956,7 @@ fn translate_merchant_offers_777() {
     let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(777, old) else {
         panic!("wrong packet");
     };
-    use azalea_registry::builtin::ItemKind;
+    use pomme_registry::builtin::ItemKind;
     let kept: Vec<_> = p
         .offers
         .iter()
@@ -2711,7 +3022,7 @@ fn translate_update_attributes_765() {
     assert_eq!(p.values.len(), 1);
     assert_eq!(
         p.values[0].attribute,
-        azalea_registry::builtin::Attribute::MaxHealth
+        pomme_registry::builtin::Attribute::MaxHealth
     );
     assert_eq!(p.values[0].base, 20.0);
     let modifier = &p.values[0].modifiers[0];
@@ -2754,31 +3065,20 @@ fn translate_level_particles_765() {
 /// `sniffer_state` sits at 25 (26.2's is 27).
 #[test]
 fn translate_entity_data_765() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(765, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[17, 25, 2]); // index 17, sniffer_state, ordinal 2
-    old.push(0xFF);
-
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(765, old) else {
-        panic!("wrong packet");
-    };
-    assert!(matches!(
-        p.packed_items.0[0].value,
-        azalea_entity::EntityDataValue::SnifferState(_)
-    ));
+    // index 17, sniffer_state, ordinal 2
     assert_eq!(
-        super::entity_data::from_azalea(&p.packed_items.0[0].value),
-        Some(pomme_protocol::entity_data::Value::Int(2))
+        entity_data_entries(765, &[17, 25, 2])[0].value,
+        pomme_protocol::entity_data::Value::Int(2)
     );
 }
 
 /// Translates a `set_entity_data` frame for entity 9 carrying `values` (the
-/// entry list without its terminator) and returns the decoded entries.
-fn entity_data_entries(protocol: i32, values: &[u8]) -> Vec<azalea_entity::EntityDataItem> {
+/// entry list without its terminator) and reads the entries as the raw
+/// handler does.
+fn entity_data_entries(
+    protocol: i32,
+    values: &[u8],
+) -> Vec<pomme_protocol::entity_data::DataValue> {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
@@ -2787,28 +3087,40 @@ fn entity_data_entries(protocol: i32, values: &[u8]) -> Vec<azalea_entity::Entit
     wire::write_varint(&mut old, 9); // entity id
     old.extend_from_slice(values);
     old.push(0xFF);
-    let ClientboundGamePacket::SetEntityData(p) = translate_decode_and_remap(protocol, old) else {
-        panic!("wrong packet");
-    };
-    p.packed_items.0
+    let translation = translation_for(protocol);
+    let translated = translation
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut r = pomme_protocol::codec::Reader::new(&translated);
+    assert_eq!(
+        r.varint(),
+        Ok(table_id(
+            Phase::Game,
+            Direction::Clientbound,
+            "set_entity_data"
+        ))
+    );
+    let (id, entries) =
+        super::entity_data::read_entity_data(&translated[r.pos()..], Some(&translation)).unwrap();
+    assert_eq!(id, 9);
+    entries
 }
 
-fn entity_data_stack(entry: &azalea_entity::EntityDataItem) -> &azalea_inventory::ItemStack {
-    let azalea_entity::EntityDataValue::ItemStack(stack) = &entry.value else {
+/// The item of an entry's stack; `None` for an empty one.
+fn entity_data_item(
+    entry: &pomme_protocol::entity_data::DataValue,
+) -> Option<pomme_registry::builtin::ItemKind> {
+    use pomme_registry::Registry;
+
+    let pomme_protocol::entity_data::Value::Item(stack) = &entry.value else {
         panic!("wrong value");
     };
-    stack
+    let stack = stack.as_ref()?;
+    Some(pomme_registry::builtin::ItemKind::from_u32(stack.item).expect("a native item"))
 }
 
-fn entity_data_item(entry: &azalea_entity::EntityDataItem) -> azalea_registry::builtin::ItemKind {
-    let azalea_inventory::ItemStack::Present(data) = entity_data_stack(entry) else {
-        panic!("empty stack");
-    };
-    data.kind
-}
-
-/// `translate_entity_data` already remaps item stacks, so `remap_inbound` must
-/// not remap them again: 26.3 `oak_log` (163) lands as native `oak_log` (161).
+/// `translate_entity_data` already remaps item stacks, so the read must not
+/// remap them again: 26.3 `oak_log` (163) lands as native `oak_log` (161).
 #[test]
 fn entity_data_item_remaps_once_777() {
     // index 8, item_stack serializer, count 1, 26.3 oak_log (varint 163),
@@ -2816,7 +3128,7 @@ fn entity_data_item_remaps_once_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 0, 0]);
     assert_eq!(
         entity_data_item(&entries[0]),
-        azalea_registry::builtin::ItemKind::OakLog
+        Some(pomme_registry::builtin::ItemKind::OakLog)
     );
 }
 
@@ -2828,7 +3140,7 @@ fn entity_data_item_with_components_remaps_once_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xA3, 1, 1, 0, 3, 5]);
     assert_eq!(
         entity_data_item(&entries[0]),
-        azalea_registry::builtin::ItemKind::OakLog
+        Some(pomme_registry::builtin::ItemKind::OakLog)
     );
 }
 
@@ -2838,10 +3150,7 @@ fn entity_data_item_with_components_remaps_once_777() {
 fn entity_data_unmapped_item_empties_777() {
     // poplar_log (varint 172), empty patch; then index 9, int serializer, 7
     let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 0, 0, 9, 1, 7]);
-    assert!(matches!(
-        entity_data_stack(&entries[0]),
-        azalea_inventory::ItemStack::Empty
-    ));
+    assert_eq!(entity_data_item(&entries[0]), None);
     assert_eq!(entries.len(), 2);
 }
 
@@ -2850,21 +3159,18 @@ fn entity_data_unmapped_item_empties_777() {
 #[test]
 fn entity_data_unmapped_item_with_components_keeps_the_list_777() {
     let entries = entity_data_entries(777, &[8, 7, 1, 0xAC, 1, 1, 0, 3, 5, 9, 1, 7]);
-    assert!(matches!(
-        entity_data_stack(&entries[0]),
-        azalea_inventory::ItemStack::Empty
-    ));
+    assert_eq!(entity_data_item(&entries[0]), None);
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].index, 9);
 }
 
-/// `translate_item_765` leaves the wire item id for the typed pass, so
-/// `remap_inbound` must still remap `set_entity_data` stacks on 765 wires.
+/// `translate_item_765` leaves the wire item id, so the read must still remap
+/// `set_entity_data` stacks on 765 wires.
 #[test]
 fn entity_data_item_remaps_765() {
     // index 8, item_stack serializer, present, 765 item id, count 1, empty NBT
     let entries = entity_data_entries(765, &[8, 7, 1, SHIFTED_ITEM, 1, 0x0A, 0x00]);
-    assert_eq!(entity_data_item(&entries[0]), SHIFTED_ITEM_KIND);
+    assert_eq!(entity_data_item(&entries[0]), Some(SHIFTED_ITEM_KIND));
 }
 
 /// `container_set_slot`'s -1/-2 sentinels split like 767's, but with the
@@ -2888,14 +3194,14 @@ fn translate_container_set_slot_765() {
     assert_eq!(
         read("set_cursor_item", build(-1, 0)),
         ContainerPacket::Cursor {
-            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+            item: pomme_stack(pomme_registry::builtin::ItemKind::Stone, 2)
         }
     );
     assert_eq!(
         read("set_player_inventory", build(-2, 7)),
         ContainerPacket::PlayerInventory {
             slot: 7,
-            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+            item: pomme_stack(pomme_registry::builtin::ItemKind::Stone, 2)
         }
     );
     assert_eq!(
@@ -2904,7 +3210,7 @@ fn translate_container_set_slot_765() {
             container_id: 3,
             state_id: 2,
             slot: 1,
-            item: pomme_stack(azalea_registry::builtin::ItemKind::Stone, 2)
+            item: pomme_stack(pomme_registry::builtin::ItemKind::Stone, 2)
         }
     );
 }
@@ -2943,10 +3249,11 @@ fn translate_creative_slot_775() {
     use pomme_protocol::RegistryTable;
 
     let (native_item, native_size, _) = dripstone_with_size(RegistryTable::native());
-    let frame = pomme_protocol::wire::encode_set_creative_mode_slot(
-        36,
-        Some(&native_dripstone_with_size()),
-    );
+    let frame = pomme_protocol::serverbound::GamePacket::SetCreativeModeSlot {
+        slot: 36,
+        stack: Some(native_dripstone_with_size()),
+    }
+    .encode();
 
     let (wire_item, wire_size, wire_stack) =
         dripstone_with_size(RegistryTable::for_protocol(775).unwrap());
@@ -3020,7 +3327,7 @@ fn translate_container_set_slot_777() {
     );
     old.extend_from_slice(&0x123456i32.to_be_bytes());
 
-    let mut item = pomme_stack(azalea_registry::builtin::ItemKind::Diamond, 1).unwrap();
+    let mut item = pomme_stack(pomme_registry::builtin::ItemKind::Diamond, 1).unwrap();
     item.patch.added.push((
         registry_id(
             native_table,
@@ -4078,10 +4385,9 @@ fn translate_add_player_763() {
     let native =
         translation.remap_to_native(pomme_protocol::ClientRegistry::EntityType, entity_type);
     assert_eq!(
-        native.and_then(
-            <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32
-        ),
-        Some(azalea_registry::builtin::EntityKind::Player)
+        native
+            .and_then(<pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32),
+        Some(pomme_registry::builtin::EntityKind::Player)
     );
     assert_eq!(position, glam::DVec3::new(1.5, 64.0, -2.5));
     let angle = pomme_protocol::entity::unpack_degrees;
@@ -4143,7 +4449,7 @@ fn translate_container_set_content_763() {
         ContainerPacket::Content {
             container_id: 1,
             state_id: 2,
-            items: vec![pomme_stack(azalea_registry::builtin::ItemKind::Stone, 3)],
+            items: vec![pomme_stack(pomme_registry::builtin::ItemKind::Stone, 3)],
             carried: None,
         }
     );
@@ -4275,57 +4581,80 @@ fn translate_tag_query_763() {
 /// Every element pomme embeds for `minecraft:core` has to survive azalea's
 /// registry holder: an entry it fails to deserialize is logged and skipped
 /// (`RegistryType::append_nbt`), which shifts the protocol id of every entry
-/// after it. Claiming the pack is only safe while this holds.
+/// after it. Claiming the pack is only safe while this holds, for every
+/// version with a table. A registry whose elements aren't compounds is left
+/// out whole, as it is when a server sends it.
 #[test]
 fn embedded_known_pack_elements_deserialize_through_azalea() {
-    for (registry, elements) in pomme_protocol::KnownPackTable::native().registries() {
-        let holder = crate::net::known_packs::filled_holder(registry);
-        let kept = match registry {
-            "dimension_type" => holder.dimension_type.map.len(),
-            "enchantment" => holder.enchantment.map.len(),
-            _ => holder.extra.values().map(|r| r.map.len()).sum(),
-        };
-        assert_eq!(kept, elements.count(), "{registry}: entries were dropped");
+    use crate::net::config_wire::RegistryError;
 
-        // The values have to survive the JSON -> NBT conversion too, not just
-        // the deserialize: `dimension_info` reads these two off the holder.
-        if registry == "dimension_type" {
-            let overworld = &holder.dimension_type.map[&Identifier::new("minecraft:overworld")];
-            assert_eq!(overworld.height, 384);
-            assert_eq!(overworld.min_y, -64);
+    for protocol in [pomme_protocol::version::NATIVE.protocol, 777] {
+        let table = pomme_protocol::KnownPackTable::for_protocol(protocol).expect("a table");
+        for (registry, elements) in table.registries() {
+            let holder = match crate::net::known_packs::filled_holder(protocol, registry) {
+                Ok(holder) => holder,
+                Err(RegistryError::Unsupported(_)) if registry == "block_transformer" => continue,
+                Err(e) => panic!("{protocol} {registry}: {e}"),
+            };
+            let kept = match registry {
+                "dimension_type" => holder.dimension_type.map.len(),
+                "enchantment" => holder.enchantment.map.len(),
+                _ => holder.extra.values().map(|r| r.map.len()).sum(),
+            };
+            assert_eq!(
+                kept,
+                elements.count(),
+                "{protocol} {registry}: entries were dropped"
+            );
+
+            // The values have to survive the JSON -> NBT conversion too, not
+            // just the deserialize: `dimension_info` reads these two off the
+            // holder.
+            if registry == "dimension_type" {
+                let overworld = &holder.dimension_type.map[&Identifier::new("minecraft:overworld")];
+                assert_eq!(overworld.height, 384);
+                assert_eq!(overworld.min_y, -64);
+            }
         }
     }
 }
 
-/// The reply's fields go out as namespace, id, version (`KnownPack`'s stream
-/// codec), and pomme claims vanilla's core pack at the native version.
+/// Pomme claims vanilla's core pack at the native version, and its reply
+/// goes out as azalea writes the same packs.
 #[test]
-fn select_known_packs_reply_is_byte_exact() {
-    use azalea_buf::AzBuf;
+fn select_known_packs_reply_matches_azalea() {
+    use azalea_protocol::packets::config::ServerboundConfigPacket;
     use azalea_protocol::packets::config::s_select_known_packs::{
-        KnownPack, ServerboundSelectKnownPacks,
+        KnownPack as AzaleaPack, ServerboundSelectKnownPacks,
     };
+    use pomme_protocol::KnownPack;
+    use pomme_protocol::configuration::ServerboundConfig;
 
     let core_of = |namespace: &str| KnownPack {
         namespace: namespace.to_owned(),
         id: "core".to_owned(),
         version: pomme_protocol::version::NATIVE.name.to_owned(),
     };
-    let offered = vec![core_of("minecraft"), core_of("pomme")];
+    let offered = [core_of("minecraft"), core_of("pomme")];
     let known_packs =
         crate::net::known_packs::select_packs(pomme_protocol::version::NATIVE.protocol, &offered);
     assert_eq!(known_packs, offered[..1]);
 
-    let mut bytes = Vec::new();
-    ServerboundSelectKnownPacks { known_packs }
-        .azalea_write(&mut bytes)
-        .unwrap();
-    let mut expected = vec![1]; // one pack
-    for field in ["minecraft", "core", pomme_protocol::version::NATIVE.name] {
-        expected.push(field.len() as u8);
-        expected.extend_from_slice(field.as_bytes());
-    }
-    assert_eq!(bytes, expected);
+    let azalea = ServerboundConfigPacket::SelectKnownPacks(ServerboundSelectKnownPacks {
+        known_packs: known_packs
+            .iter()
+            .cloned()
+            .map(|p| AzaleaPack {
+                namespace: p.namespace,
+                id: p.id,
+                version: p.version,
+            })
+            .collect(),
+    });
+    assert_eq!(
+        *azalea_protocol::write::serialize_packet(&azalea).unwrap(),
+        ServerboundConfig::SelectKnownPacks(known_packs).encode()
+    );
 }
 
 /// 26.3's clientbound insertions shift ids, and the layouts 26.2 rewrote
@@ -4612,10 +4941,10 @@ fn translate_explode_777() {
 fn azalea_spawn_info(
     previous: Option<azalea_core::game_type::GameMode>,
 ) -> azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-    use azalea_registry::DataRegistry;
+    use pomme_registry::DataRegistry;
 
     azalea_protocol::packets::common::CommonPlayerSpawnInfo {
-        dimension_type: azalea_registry::data::DimensionKind::new_raw(0),
+        dimension_type: pomme_registry::data::DimensionKind::new_raw(0),
         dimension: "minecraft:overworld".into(),
         seed: 42,
         game_type: azalea_core::game_type::GameMode::Survival,
@@ -4799,84 +5128,136 @@ fn translate_level_particles_777() {
     }
 }
 
-/// 26.3's `update_advancements` sends each advancement's screen position
-/// after the entry rather than inside its `DisplayInfo`, and sends one even
-/// without a display.
+/// One `update_advancements` entry as protocol `protocol` lays it out: a
+/// display whose icon is `item` (a name in that version's registry) unless
+/// `item` is `None`, one requirement, and the screen position (1.5, -2).
+fn advancement_entry(protocol: i32, name: &str, item: Option<&str>) -> Vec<u8> {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let mut out = Vec::new();
+    wire::write_utf(&mut out, name);
+    out.push(0); // no parent
+    out.push(u8::from(item.is_some()));
+    if let Some(item) = item {
+        let table = RegistryTable::for_protocol(protocol).unwrap();
+        let item = registry_id(table, ClientRegistry::Item, item);
+        for text in ["Title", "Description"] {
+            out.extend_from_slice(&[8, 0, text.len() as u8]);
+            out.extend_from_slice(text.as_bytes());
+        }
+        // Through 1.21.11 the icon is an `ItemStack`, count first.
+        if protocol <= 774 {
+            out.push(1);
+            wire::write_varint(&mut out, item);
+        } else {
+            wire::write_varint(&mut out, item);
+            out.push(1);
+        }
+        out.extend_from_slice(&[0, 0]); // empty patch
+        out.push(2); // goal
+        out.extend_from_slice(&2i32.to_be_bytes()); // show toast, no background
+    }
+    let position = [1.5f32.to_be_bytes(), (-2.0f32).to_be_bytes()].concat();
+    // 26.3 sends the position after the entry, display or not.
+    if item.is_some() && protocol < 777 {
+        out.extend_from_slice(&position);
+    }
+    out.push(1); // one requirement group
+    out.push(1);
+    wire::write_utf(&mut out, "a");
+    out.push(0); // no telemetry
+    if protocol >= 777 {
+        out.extend_from_slice(&position);
+    }
+    out
+}
+
+/// An `update_advancements` frame for `protocol` adding `entries`.
+fn advancements_frame(protocol: i32, id: u32, entries: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    wire::write_varint(&mut out, id);
+    out.push(1); // reset
+    wire::write_varint(&mut out, entries.len() as u32);
+    out.extend(entries.iter().flatten());
+    out.extend_from_slice(&[0, 0]); // no removals, no progress
+    // 1.21.5 appended `showAdvancements`.
+    if protocol >= 770 {
+        out.push(1);
+    }
+    out
+}
+
+/// Every translated version's `update_advancements` lands as the frame a
+/// 26.2 server sends: the icon an `ItemStackTemplate` in native ids, the
+/// position inside the display, `showAdvancements` set.
 #[test]
-fn translate_update_advancements_777() {
-    use azalea_buf::AzBuf;
-    use azalea_inventory::{ItemStack, ItemStackData};
-    use azalea_protocol::packets::game::c_update_advancements::{
-        Advancement, AdvancementHolder, ClientboundUpdateAdvancements, DisplayInfo, FrameType,
+fn translate_update_advancements_to_native() {
+    let native_id = table_id(Phase::Game, Direction::Clientbound, "update_advancements");
+    let entries = |protocol| {
+        vec![
+            advancement_entry(protocol, "minecraft:story/root", Some("wooden_pickaxe")),
+            advancement_entry(protocol, "minecraft:story/mine_stone", None),
+        ]
     };
-
-    let displayed = AdvancementHolder {
-        id: "minecraft:story/root".into(),
-        value: Advancement {
-            parent_id: None,
-            display: Some(Box::new(DisplayInfo {
-                title: azalea_chat::FormattedText::default(),
-                description: azalea_chat::FormattedText::default(),
-                icon: ItemStack::Present(ItemStackData {
-                    count: 1,
-                    kind: azalea_registry::builtin::ItemKind::Stone,
-                    component_patch: Default::default(),
-                }),
-                frame: FrameType::Task,
-                show_toast: true,
-                hidden: false,
-                background: Some(
-                    "minecraft:textures/gui/advancements/backgrounds/stone.png".into(),
-                ),
-                x: 1.5,
-                y: -2.0,
-            })),
-            requirements: vec![vec!["a".into()]],
-            sends_telemetry_event: false,
-        },
-    };
-    let bare = AdvancementHolder {
-        id: "minecraft:story/mine_stone".into(),
-        value: Advancement {
-            parent_id: Some("minecraft:story/root".into()),
-            display: None,
-            requirements: vec![],
-            sends_telemetry_event: true,
-        },
-    };
-    let packet = ClientboundGamePacket::UpdateAdvancements(ClientboundUpdateAdvancements {
-        reset: true,
-        added: vec![displayed.clone(), bare.clone()],
-        removed: vec![],
-        progress: Default::default(),
-        show_advancements: true,
-    });
-    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
-
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(777, Direction::Clientbound, "update_advancements"),
+    // 26.1's frame is the native one but for its ids.
+    let expected = advancements_frame(
+        775,
+        native_id,
+        &entries(pomme_protocol::version::NATIVE.protocol),
     );
-    old.push(1); // reset
-    wire::write_varint(&mut old, 2);
-    // The displayed holder ends in its one requirement (4 bytes) and the
-    // telemetry bool; the position pair precedes those in the native form.
-    let mut holder = Vec::new();
-    displayed.azalea_write(&mut holder).unwrap();
-    let (body, tail) = holder.split_at(holder.len() - 5);
-    let (display, position) = body.split_at(body.len() - 8);
-    old.extend_from_slice(display);
-    old.extend_from_slice(tail);
-    old.extend_from_slice(position);
-    bare.azalea_write(&mut old).unwrap();
-    old.extend_from_slice(&[0; 8]); // a position without a display
-    old.extend_from_slice(&[0, 0, 1]); // no removals, no progress, show
+    for protocol in [766, 769, 772, 774, 775, 777] {
+        let old = advancements_frame(
+            protocol,
+            old_id(protocol, Direction::Clientbound, "update_advancements"),
+            &entries(protocol),
+        );
+        let translated = translation_for(protocol)
+            .translate_game_frame(old.into_boxed_slice())
+            .unwrap();
+        assert_eq!(&translated[..], &expected[..], "{protocol}");
+    }
 
+    let mut r = pomme_protocol::codec::Reader::new(&expected);
+    r.varint().unwrap();
+    let update = super::advancement_wire::read_update(&expected[r.pos()..]).unwrap();
+    assert!(update.show_advancements);
+    let display = update.added[0].1.display.as_ref().unwrap();
+    assert_eq!(display.icon_item.as_deref(), Some("wooden_pickaxe"));
+    assert!(update.added[1].1.display.is_none());
+}
+
+/// An icon the native version lacks (26.3 `poplar_log`) takes its display
+/// with it; the entry and the ones after it stay.
+#[test]
+fn advancement_with_unmapped_icon_loses_its_display_777() {
+    let old = advancements_frame(
+        777,
+        old_id(777, Direction::Clientbound, "update_advancements"),
+        &[
+            advancement_entry(777, "minecraft:a", Some("poplar_log")),
+            advancement_entry(777, "minecraft:b", Some("stone")),
+        ],
+    );
     let translated = translation_for(777)
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
-    assert_eq!(&translated[..], &frame[..]);
+    let expected = advancements_frame(
+        775,
+        table_id(Phase::Game, Direction::Clientbound, "update_advancements"),
+        &[
+            advancement_entry(
+                pomme_protocol::version::NATIVE.protocol,
+                "minecraft:a",
+                None,
+            ),
+            advancement_entry(
+                pomme_protocol::version::NATIVE.protocol,
+                "minecraft:b",
+                Some("stone"),
+            ),
+        ],
+    );
+    assert_eq!(&translated[..], &expected[..]);
 }
 
 /// 26.3 appended the `dye_color` serializer (43); an entry using it drops
@@ -4907,9 +5288,10 @@ fn translate_entity_data_777() {
 }
 
 /// Outbound on 26.3: `swing` becomes the payload-less, main-hand-only
-/// `punch`; `player_action` actions after the first shift up by one; and
-/// `accept_teleportation` takes the pose of the `move_player_pos_rot`
-/// following it, which 26.3 no longer sends.
+/// `punch`; `player_action` actions after the first shift up by one;
+/// `sign_update` carries its text side last; and `accept_teleportation`
+/// takes the pose of the `move_player_pos_rot` following it, which 26.3 no
+/// longer sends.
 #[test]
 fn translate_outbound_777() {
     let t = translation_for(777);
@@ -4941,6 +5323,17 @@ fn translate_outbound_777() {
         assert_eq!(
             t.translate_outbound_game_frame(frame(sb("player_action"), &payload)),
             vec![frame(old_sb("player_action"), &expected)]
+        );
+    }
+
+    // The text side moves from before the four lines to after them.
+    let (sign_pos, lines) = ([0, 0, 0, 0, 0, 0, 0, 9], [2, b'h', b'i', 0, 0, 0]);
+    for front in [0, 1] {
+        let native = [&sign_pos[..], &[front], &lines].concat();
+        let wire = [&sign_pos[..], &lines, &[front]].concat();
+        assert_eq!(
+            t.translate_outbound_game_frame(frame(sb("sign_update"), &native)),
+            vec![frame(old_sb("sign_update"), &wire)]
         );
     }
 
@@ -5247,10 +5640,8 @@ fn translate_commands_777() {
     );
     assert_ne!(old_parser("uuid"), native_parser("uuid"));
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::Commands(p) = translate_and_decode(777, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.entries.len(), 5);
+    let p = translate_and_read(777, old, "commands", pomme_protocol::commands::read);
+    assert_eq!(p.nodes.len(), 5);
 }
 
 /// A pre-1.20.5 `server_data` frame: `motd`, no icon, then `tail`.
@@ -5359,10 +5750,8 @@ fn translate_commands_763() {
     );
     assert_ne!(parser(old_table, "resource"), parser(native, "resource"));
     assert_eq!(&translated[..], &expected[..]);
-    let ClientboundGamePacket::Commands(p) = translate_and_decode(763, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.entries.len(), 3);
+    let p = translate_and_read(763, old, "commands", pomme_protocol::commands::read);
+    assert_eq!(p.nodes.len(), 3);
 }
 
 /// 26.3's `tag` slot display carries a `HolderSet`: a named tag becomes the
@@ -5855,7 +6244,7 @@ fn entity_data_matches_azalea() {
         assert_eq!(ours.index, theirs.index);
         match (&ours.value, &theirs.value) {
             (Value::Item(Some(stack)), EntityDataValue::ItemStack(az)) => {
-                assert_eq!(&crate::net::item_codec::to_azalea(stack), az);
+                assert_eq!(&crate::net::item_codec::to_fork(stack), az);
             }
             // azalea re-encodes text as a compound; compare what it says.
             (Value::Component(nbt), EntityDataValue::FormattedText(az)) => {
@@ -5866,13 +6255,56 @@ fn entity_data_matches_azalea() {
             }
             (ours, theirs) => assert_eq!(
                 Some(ours),
-                super::entity_data::from_azalea(theirs)
-                    .as_ref()
-                    .or(Some(&Value::Other)),
+                pomme_data_value(theirs).as_ref().or(Some(&Value::Other)),
                 "{theirs:?}"
             ),
         }
     }
+}
+
+/// azalea's decode of an entity data value as pomme's, for the values the
+/// client reads.
+fn pomme_data_value(
+    value: &azalea_entity::EntityDataValue,
+) -> Option<pomme_protocol::entity_data::Value> {
+    use azalea_buf::AzBuf;
+    use azalea_entity::EntityDataValue;
+    use pomme_protocol::entity_data::{Value, Variant};
+    use pomme_registry::{DataRegistry, Registry};
+
+    Some(match value {
+        EntityDataValue::Byte(v) => Value::Byte(*v),
+        EntityDataValue::Int(v) => Value::Int(*v),
+        EntityDataValue::Long(v) => Value::Long(*v),
+        EntityDataValue::Float(v) => Value::Float(*v),
+        EntityDataValue::Boolean(v) => Value::Bool(*v),
+        EntityDataValue::OptionalFormattedText(text) => Value::OptionalComponent(match text {
+            Some(text) => {
+                let mut nbt = Vec::new();
+                text.azalea_write(&mut nbt).ok()?;
+                Some(nbt.into())
+            }
+            None => None,
+        }),
+        EntityDataValue::OptionalBlockPos(pos) => {
+            Value::OptionalBlockPos(pos.map(|pos| (pos.x, pos.y, pos.z)))
+        }
+        EntityDataValue::Pose(pose) => Value::Pose(*pose as u32),
+        EntityDataValue::VillagerData(data) => Value::VillagerData {
+            kind: data.kind.to_u32(),
+            profession: data.profession.to_u32(),
+            level: data.level,
+        },
+        EntityDataValue::CatVariant(v) => Value::Variant(Variant::Cat, v.protocol_id()),
+        EntityDataValue::CowVariant(v) => Value::Variant(Variant::Cow, v.protocol_id()),
+        EntityDataValue::WolfVariant(v) => Value::Variant(Variant::Wolf, v.protocol_id()),
+        EntityDataValue::ChickenVariant(v) => Value::Variant(Variant::Chicken, v.protocol_id()),
+        EntityDataValue::SnifferState(state) => Value::Int(*state as i32),
+        EntityDataValue::CopperGolemState(state) => Value::Int(*state as i32),
+        EntityDataValue::WeatheringCopperState(state) => Value::Int(*state as i32),
+        EntityDataValue::ArmadilloState(state) => Value::Int(*state as i32),
+        _ => return None,
+    })
 }
 
 /// pomme's `update_advancements` decode agrees with azalea's on every field
@@ -5992,7 +6424,7 @@ fn entity_packets_match_azalea() {
         ClientboundGamePacket::AddEntity(c_add_entity::ClientboundAddEntity {
             id,
             uuid: uuid::Uuid::from_u128(42),
-            entity_type: azalea_registry::builtin::EntityKind::Zombie,
+            entity_type: pomme_registry::builtin::EntityKind::Zombie,
             position,
             movement: LpVec3::from(movement),
             x_rot: -64,
@@ -6006,8 +6438,8 @@ fn entity_packets_match_azalea() {
     };
     assert_eq!(uuid, 42);
     assert_eq!(
-        <azalea_registry::builtin::EntityKind as azalea_registry::Registry>::from_u32(entity_type),
-        Some(azalea_registry::builtin::EntityKind::Zombie)
+        <pomme_registry::builtin::EntityKind as pomme_registry::Registry>::from_u32(entity_type),
+        Some(pomme_registry::builtin::EntityKind::Zombie)
     );
     assert_eq!(p, dvec(position));
     assert!((m - dvec(movement)).abs().max_element() < 1e-3);
@@ -6265,9 +6697,9 @@ fn player_packets_match_azalea() {
     use azalea_protocol::packets::game::c_game_event::EventType;
     use azalea_protocol::packets::game::c_player_abilities::PlayerAbilitiesFlags;
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::{Attribute, MobEffect};
     use pomme_protocol::player::{self, AttributeSnapshot, PlayerPacket};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::{Attribute, MobEffect};
 
     let decode = |name, packet| decode_azalea(name, packet, player::read);
     let cases = [
@@ -6457,9 +6889,9 @@ fn block_packets_match_azalea() {
     use azalea_block::BlockState;
     use azalea_core::position::{BlockPos, ChunkSectionBlockPos, ChunkSectionPos};
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::{BlockEntityKind, BlockKind};
     use pomme_protocol::block::{self, BlockPacket};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::{BlockEntityKind, BlockKind};
 
     let decode = |name, packet| decode_azalea(name, packet, block::read);
     let pos = BlockPos::new(-3, -60, 4);
@@ -6559,9 +6991,9 @@ fn chunk_packets_match_azalea() {
     use azalea_core::heightmap_kind::HeightmapKind;
     use azalea_core::position::ChunkPos;
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::BlockEntityKind;
     use pomme_protocol::chunk::{BlockEntityInfo, ChunkBiomes, LightData};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::BlockEntityKind;
 
     let decode = |name, packet| decode_azalea(name, packet, chunk::read);
     let light_data = || c_light_update::ClientboundLightUpdatePacketData {
@@ -6694,8 +7126,8 @@ fn container_packets_match_azalea() {
     use azalea_inventory::components::EquipmentSlot;
     use azalea_inventory::{ItemStack, ItemStackData};
     use azalea_protocol::packets::game::*;
-    use azalea_registry::Registry;
-    use azalea_registry::builtin::{ItemKind, MenuKind};
+    use pomme_registry::Registry;
+    use pomme_registry::builtin::{ItemKind, MenuKind};
 
     let decode = |name, packet| decode_azalea(name, packet, container::read);
     let azalea_stack = |kind, count| {
@@ -7319,8 +7751,8 @@ fn lifecycle_packets_match_azalea() {
     use azalea_core::game_type::GameMode;
     use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
     use azalea_protocol::packets::game::*;
-    use azalea_registry::DataRegistry;
     use pomme_protocol::lifecycle::{ClockState, Login, SpawnInfo};
+    use pomme_registry::DataRegistry;
 
     let decode = |name, packet| decode_azalea(name, packet, lifecycle::read);
     let spawn = SpawnInfo {
@@ -7433,7 +7865,7 @@ fn lifecycle_packets_match_azalea() {
             ClientboundGamePacket::SetTime(c_set_time::ClientboundSetTime {
                 game_time: 100,
                 clock_updates: [(
-                    azalea_registry::data::WorldClock::new_raw(1),
+                    pomme_registry::data::WorldClock::new_raw(1),
                     c_set_time::ClockState {
                         total_ticks: 6000,
                         partial_tick: 0.5,
@@ -7482,16 +7914,15 @@ fn lifecycle_packets_match_azalea() {
 
 #[test]
 fn client_information_reports_the_skin_options() {
-    use azalea_entity::HumanoidArm;
     let skin = crate::ui::menu::SkinOptions {
         hat: false,
         main_hand_right: false,
         ..Default::default()
     };
     let info = super::client_information(8, crate::ui::chat::ChatOptions::default(), skin);
-    assert_eq!(info.main_hand, HumanoidArm::Left);
-    assert!(!info.model_customization.hat);
-    assert!(info.model_customization.cape);
+    // `HumanoidArm.LEFT`, and every `PlayerModelPart` bit but the hat's.
+    assert_eq!(info.main_hand, 0);
+    assert_eq!(info.model_customisation, 0x3f);
 }
 
 /// Reconnecting on the same protocol cannot inherit a previous dimension order.
@@ -7544,4 +7975,275 @@ fn reconnect_resets_translation_dimensions() {
         new.spawn.dimension_type, 0,
         "new connection must not retain custom_end at index 1"
     );
+}
+
+/// azalea's encoders for the packets pomme now decodes itself land as the
+/// same events through pomme's raw handlers.
+#[test]
+fn azalea_encoded_player_and_world_packets_read_in_pomme() {
+    use azalea_protocol::packets::game::{
+        c_move_vehicle, c_open_sign_editor, c_resource_pack_pop, c_resource_pack_push,
+        c_set_camera, c_waypoint,
+    };
+
+    use crate::net::NetworkEvent;
+
+    let read = |packet: ClientboundGamePacket| {
+        let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (took, _) = crate::net::handler::handle_raw_for_test(
+            &frame,
+            crate::world::block::BlockStateTable::native(),
+            &tx,
+        );
+        assert!(took, "{packet:?}");
+        rx.try_iter().next().expect("an event")
+    };
+
+    let id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+    assert!(matches!(
+        read(ClientboundGamePacket::SetCamera(
+            c_set_camera::ClientboundSetCamera {
+                camera_id: MinecraftEntityId(300),
+            }
+        )),
+        NetworkEvent::SetCamera { id: 300 }
+    ));
+    let NetworkEvent::MoveVehicle {
+        position,
+        y_rot_deg,
+        x_rot_deg,
+    } = read(ClientboundGamePacket::MoveVehicle(
+        c_move_vehicle::ClientboundMoveVehicle {
+            pos: azalea_core::position::Vec3::new(1.5, 64.0, -2.25),
+            look_direction: azalea_entity::LookDirection::new(90.0, -10.0),
+        },
+    ))
+    else {
+        panic!("expected move_vehicle");
+    };
+    assert_eq!(
+        (position, y_rot_deg, x_rot_deg),
+        (glam::DVec3::new(1.5, 64.0, -2.25), 90.0, -10.0)
+    );
+    let NetworkEvent::OpenSignEditor { pos, is_front_text } = read(
+        ClientboundGamePacket::OpenSignEditor(c_open_sign_editor::ClientboundOpenSignEditor {
+            pos: azalea_core::position::BlockPos::new(-12, 70, 345),
+            is_front_text: false,
+        }),
+    ) else {
+        panic!("expected open_sign_editor");
+    };
+    assert_eq!(
+        (pos, is_front_text),
+        (azalea_core::position::BlockPos::new(-12, 70, 345), false)
+    );
+    let NetworkEvent::ResourcePackPush {
+        id: pushed, url, ..
+    } = read(ClientboundGamePacket::ResourcePackPush(
+        c_resource_pack_push::ClientboundResourcePackPush {
+            id,
+            url: "https://example.com/pack.zip".into(),
+            hash: String::new(),
+            required: true,
+            prompt: None,
+        },
+    ))
+    else {
+        panic!("expected resource_pack_push");
+    };
+    assert_eq!((pushed, url.as_str()), (id, "https://example.com/pack.zip"));
+    assert!(matches!(
+        read(ClientboundGamePacket::ResourcePackPop(
+            c_resource_pack_pop::ClientboundResourcePackPop { id: Some(id) }
+        )),
+        NetworkEvent::ResourcePackPop { id: Some(popped) } if popped == id
+    ));
+    let NetworkEvent::Waypoint {
+        operation,
+        waypoint,
+    } = read(ClientboundGamePacket::Waypoint(
+        c_waypoint::ClientboundWaypoint {
+            operation: c_waypoint::WaypointOperation::Update,
+            waypoint: c_waypoint::TrackedWaypoint {
+                identifier: c_waypoint::WaypointIdentifier::Uuid(id),
+                icon: c_waypoint::WaypointIcon {
+                    style: Identifier::new("minecraft:bowtie"),
+                    color: Some(azalea_core::color::RgbColor::new(0x12, 0xab, 0x34)),
+                },
+                data: c_waypoint::WaypointData::Chunk { x: -3, z: 7 },
+            },
+        },
+    ))
+    else {
+        panic!("expected waypoint");
+    };
+    assert_eq!(
+        operation,
+        pomme_protocol::waypoint::WaypointOperation::Update
+    );
+    assert_eq!(
+        waypoint,
+        pomme_protocol::waypoint::TrackedWaypoint {
+            id: pomme_protocol::waypoint::WaypointId::Uuid(id.as_u128()),
+            style: "minecraft:bowtie".into(),
+            color: Some([0x12, 0xab, 0x34]),
+            data: pomme_protocol::waypoint::WaypointData::Chunk { x: -3, z: 7 },
+        }
+    );
+}
+
+/// azalea's `commands` encoder and pomme's reader agree on a tree with a
+/// redirect, custom suggestions and argument properties.
+#[test]
+fn azalea_encoded_commands_read_in_pomme() {
+    use azalea_protocol::packets::game::c_commands::{
+        BrigadierNodeStub, BrigadierNumber, BrigadierParser, BrigadierString, ClientboundCommands,
+        EntityParser, NodeType,
+    };
+    use pomme_protocol::commands::{
+        ArgumentType, Bounds, CommandsPacket, EntityArgument, NodeStub, StringType,
+    };
+
+    use crate::net::commands::tests::{argument, literal, redirect, root};
+
+    let azalea_node = |node_type, children, executable, redirect_node| BrigadierNodeStub {
+        is_executable: executable,
+        children,
+        redirect_node,
+        node_type,
+        is_restricted: false,
+    };
+    let azalea_argument = |name: &str, parser, suggestions_type| NodeType::Argument {
+        name: name.into(),
+        parser,
+        suggestions_type,
+    };
+    let packet = ClientboundGamePacket::Commands(ClientboundCommands {
+        entries: vec![
+            azalea_node(NodeType::Root, vec![1, 5], false, None),
+            azalea_node(
+                NodeType::Literal {
+                    name: "give".into(),
+                },
+                vec![2],
+                false,
+                None,
+            ),
+            azalea_node(
+                azalea_argument(
+                    "targets",
+                    BrigadierParser::Entity(EntityParser {
+                        single: false,
+                        players_only: true,
+                    }),
+                    Some(Identifier::new("minecraft:ask_server")),
+                ),
+                vec![3],
+                false,
+                None,
+            ),
+            azalea_node(
+                azalea_argument(
+                    "item",
+                    BrigadierParser::ResourceKey {
+                        registry_key: Identifier::new("minecraft:item"),
+                    },
+                    None,
+                ),
+                vec![4],
+                false,
+                None,
+            ),
+            azalea_node(
+                azalea_argument(
+                    "count",
+                    BrigadierParser::Integer(BrigadierNumber::new(Some(1), None)),
+                    None,
+                ),
+                vec![6],
+                true,
+                None,
+            ),
+            azalea_node(
+                NodeType::Literal { name: "g".into() },
+                vec![],
+                false,
+                Some(1),
+            ),
+            azalea_node(
+                azalea_argument(
+                    "note",
+                    BrigadierParser::String(BrigadierString::QuotablePhrase),
+                    None,
+                ),
+                vec![],
+                true,
+                None,
+            ),
+        ],
+        root_index: 0,
+    });
+    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let decoded = read_native_frame(&frame, "commands", pomme_protocol::commands::read);
+
+    let mut targets = argument(
+        "targets",
+        ArgumentType::Entity(EntityArgument {
+            single: false,
+            players_only: true,
+        }),
+        vec![3],
+        false,
+    );
+    if let NodeStub::Argument { suggestions, .. } = &mut targets.stub {
+        *suggestions = Some("minecraft:ask_server".into());
+    }
+    assert_eq!(
+        decoded,
+        CommandsPacket {
+            nodes: vec![
+                root(vec![1, 5]),
+                literal("give", vec![2], false),
+                targets,
+                argument(
+                    "item",
+                    ArgumentType::ResourceKey {
+                        registry: "minecraft:item".into(),
+                    },
+                    vec![4],
+                    false,
+                ),
+                argument(
+                    "count",
+                    ArgumentType::Integer(Bounds {
+                        min: Some(1),
+                        max: None,
+                    }),
+                    vec![6],
+                    true,
+                ),
+                redirect("g", 1),
+                argument(
+                    "note",
+                    ArgumentType::String(StringType::QuotablePhrase),
+                    vec![],
+                    true,
+                ),
+            ],
+            root_index: 0,
+        }
+    );
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let (took, _) = crate::net::handler::handle_raw_for_test(
+        &frame,
+        crate::world::block::BlockStateTable::native(),
+        &tx,
+    );
+    assert!(took);
+    let Some(crate::net::NetworkEvent::CommandTree { tree }) = rx.try_iter().next() else {
+        panic!("expected a command tree");
+    };
+    assert_eq!(tree.root_child_names(), ["give", "g"]);
 }

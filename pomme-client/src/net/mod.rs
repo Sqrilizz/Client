@@ -1,3 +1,4 @@
+pub mod address;
 mod advancement_wire;
 #[cfg(test)]
 mod azalea_compat;
@@ -8,6 +9,8 @@ pub(crate) mod chat_security;
 pub mod chunk_batch;
 pub(crate) mod chunk_wire;
 pub mod commands;
+mod commands_wire;
+mod config_wire;
 pub mod conn;
 pub mod connection;
 mod container_wire;
@@ -15,6 +18,7 @@ mod dialog;
 mod entity_data;
 mod entity_wire;
 mod environment_wire;
+pub mod frame;
 pub mod handler;
 pub(crate) mod http;
 mod hud_wire;
@@ -25,22 +29,25 @@ mod player_info_wire;
 mod player_wire;
 mod recipe_wire;
 pub mod resolve;
+mod resource_pack_wire;
 mod scoreboard_wire;
 pub mod sender;
 mod session;
 mod sound_wire;
 pub mod stream;
 pub mod translate;
+mod waypoint_wire;
 #[cfg(test)]
 mod wire_corpus;
 
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlot;
-use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
+use pomme_item::ItemStack;
+use pomme_protocol::codec::{DecodeResult, Reader};
+use pomme_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::NbtCompound;
 
 use crate::entity::MetaValue;
@@ -61,24 +68,28 @@ pub struct PacketLightData {
     pub empty_block_y_mask: crate::world::light::BitSet,
 }
 
-/// Decodes a native game packet with `read`, which returns `None` for the
-/// packets it doesn't own; a frame with bytes left over is malformed.
-fn read_raw_packet<P>(
-    packet_id: u32,
-    payload: &[u8],
-    read: fn(
-        &str,
-        &mut pomme_protocol::codec::Reader,
-    ) -> Option<pomme_protocol::codec::DecodeResult<P>>,
-) -> Option<pomme_protocol::codec::DecodeResult<P>> {
+/// A pomme-protocol `read`: decodes packet `name`, or `None` if it isn't one
+/// the reader owns.
+type RawRead<P> = fn(&str, &mut Reader) -> Option<DecodeResult<P>>;
+
+/// Decodes a native game packet with `read`; a frame with bytes left over is
+/// malformed.
+fn read_raw_packet<P>(packet_id: u32, payload: &[u8], read: RawRead<P>) -> Option<DecodeResult<P>> {
     use pomme_protocol::{Direction, PacketTable, Phase};
 
     let name = PacketTable::native().name_of(Phase::Game, Direction::Clientbound, packet_id)?;
-    let mut r = pomme_protocol::codec::Reader::new(payload);
+    let mut r = Reader::new(payload);
     Some(read(name, &mut r)?.and_then(|packet| {
         r.ensure_eof()?;
         Ok(packet)
     }))
+}
+
+/// [`read_raw_packet`] on a whole native game frame, its id first.
+fn read_raw_frame<P>(raw: &[u8], read: RawRead<P>) -> Option<DecodeResult<P>> {
+    let mut r = Reader::new(raw);
+    let id = r.varint().ok()?;
+    read_raw_packet(id, &raw[r.pos()..], read)
 }
 
 /// A `GameType` id as the client stores it; `GameType.byId` maps an unknown id
@@ -206,8 +217,8 @@ pub enum NetworkEvent {
         slots: Vec<(EquipmentSlot, ItemStack)>,
     },
     Waypoint {
-        operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
-        waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
+        operation: pomme_protocol::waypoint::WaypointOperation,
+        waypoint: pomme_protocol::waypoint::TrackedWaypoint,
     },
     EntityAttributesUpdate {
         entity_id: i32,
@@ -241,7 +252,7 @@ pub enum NetworkEvent {
     },
     OpenScreen {
         container_id: i32,
-        menu_type: azalea_registry::builtin::MenuKind,
+        menu_type: pomme_registry::builtin::MenuKind,
         title: String,
         title_spans: Vec<crate::ui::text::TextSpan>,
     },
@@ -426,6 +437,8 @@ pub enum NetworkEvent {
     },
     DimensionName {
         name: String,
+        /// From a login rather than a respawn.
+        login: bool,
     },
     PlayerAbilitiesChanged {
         flying: bool,
@@ -521,7 +534,7 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
-        stack: azalea_inventory::ItemStackData,
+        stack: pomme_item::ItemStackData,
     },
     EntityHeadRotation {
         id: i32,
@@ -694,44 +707,41 @@ pub enum NetworkEvent {
     },
 }
 
-/// The client information pomme reports. The configuration and game phase
-/// packets wrap the same struct under different field names, and 1.20.1 sends
-/// it in the game phase only, so all three sites share this.
-/// Vanilla `Options.buildPlayerInformation`.
+/// The client information pomme reports. The configuration and game phases
+/// send the same record, and 1.20.1 sends it in the game phase only, so all
+/// three sites share this. Vanilla `Options.buildPlayerInformation`.
 pub fn client_information(
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
     skin: crate::ui::menu::SkinOptions,
-) -> azalea_protocol::common::client_information::ClientInformation {
-    use azalea_entity::HumanoidArm;
-    use azalea_protocol::common::client_information::*;
-    let chat_visibility = match chat_options.visibility {
-        crate::ui::chat::ChatVisibilitySetting::Full => ChatVisibility::Full,
-        crate::ui::chat::ChatVisibilitySetting::System => ChatVisibility::System,
-        crate::ui::chat::ChatVisibilitySetting::Hidden => ChatVisibility::Hidden,
-    };
-    ClientInformation {
+) -> pomme_protocol::serverbound::ClientInformation {
+    // `PlayerModelPart`, by bit.
+    let parts = [
+        skin.cape,
+        skin.jacket,
+        skin.left_sleeve,
+        skin.right_sleeve,
+        skin.left_pants,
+        skin.right_pants,
+        skin.hat,
+    ];
+    pomme_protocol::serverbound::ClientInformation {
         language: "en_us".into(),
         view_distance,
-        chat_visibility,
+        chat_visibility: match chat_options.visibility {
+            crate::ui::chat::ChatVisibilitySetting::Full => 0,
+            crate::ui::chat::ChatVisibilitySetting::System => 1,
+            crate::ui::chat::ChatVisibilitySetting::Hidden => 2,
+        },
         chat_colors: chat_options.colors,
-        model_customization: ModelCustomization {
-            cape: skin.cape,
-            jacket: skin.jacket,
-            left_sleeve: skin.left_sleeve,
-            right_sleeve: skin.right_sleeve,
-            left_pants: skin.left_pants,
-            right_pants: skin.right_pants,
-            hat: skin.hat,
-        },
-        main_hand: if skin.main_hand_right {
-            HumanoidArm::Right
-        } else {
-            HumanoidArm::Left
-        },
+        model_customisation: parts
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (bit, &shown)| mask | u8::from(shown) << bit),
+        main_hand: u32::from(skin.main_hand_right),
         text_filtering_enabled: false,
         allows_listing: true,
-        particle_status: ParticleStatus::All,
+        particle_status: 0,
     }
 }
 

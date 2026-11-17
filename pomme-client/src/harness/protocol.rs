@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use azalea_inventory::ItemStack;
+use pomme_item::ItemStack;
 use serde::{Deserialize, Serialize};
 
 use crate::app::phases::in_game::GameState;
@@ -54,6 +54,10 @@ pub enum Command {
     /// Holds a key down until `key_up`, as `press` names it.
     KeyDown(Key),
     KeyUp(Key),
+    /// The window gaining or losing focus, as the OS moving it would.
+    Focus {
+        focused: bool,
+    },
     /// Assigns inputs to a key binding for this session, unsaved.
     Bind(Bind),
     /// Changes client options through the options screen's own setters.
@@ -63,6 +67,10 @@ pub enum Command {
     /// Moves the cursor to `at`, in GUI pixels from the window's top left.
     Cursor {
         at: [f32; 2],
+    },
+    /// Moves the cursor to the middle of the button labelled `label`.
+    CursorToButton {
+        label: String,
     },
     /// Turns the mouse wheel `y` lines (positive scrolls up) over the open
     /// screen.
@@ -77,9 +85,12 @@ pub enum Command {
         button: Mouse,
     },
     ChatLog,
-    /// A PNG of the next presented frame, written to `path`.
+    /// A PNG of the next presented frame, written to `path`. Chat is cleared
+    /// first, as F3+D clears it, unless `keep_chat` is set.
     Screenshot {
         path: PathBuf,
+        #[serde(default)]
+        keep_chat: bool,
     },
     /// Holds what varies frame to frame still for the rest of the session:
     /// block light flicker, particles, animated textures, clouds, view
@@ -110,6 +121,8 @@ pub enum Mouse {
     Left,
     Right,
     Middle,
+    Back,
+    Forward,
 }
 
 impl From<Mouse> for winit::event::MouseButton {
@@ -118,6 +131,8 @@ impl From<Mouse> for winit::event::MouseButton {
             Mouse::Left => Self::Left,
             Mouse::Right => Self::Right,
             Mouse::Middle => Self::Middle,
+            Mouse::Back => Self::Back,
+            Mouse::Forward => Self::Forward,
         }
     }
 }
@@ -147,6 +162,10 @@ pub struct OptionSet {
     /// arrow does; prefix `-` to deselect it.
     pub resource_pack: Option<String>,
     pub show_subtitles: Option<bool>,
+    /// Chunk Fade in seconds, 0 (none) to 2, in twentieths.
+    pub chunk_fade: Option<f32>,
+    /// Reduce fps when: `minimized` or `afk`.
+    pub inactivity_fps_limit: Option<crate::ui::menu::InactivityFpsLimit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -388,7 +407,7 @@ pub struct EntitiesInfo {
 }
 
 pub fn entities(game: &GameState) -> EntitiesInfo {
-    use azalea_registry::builtin::EntityKind;
+    use pomme_registry::builtin::EntityKind;
 
     let living = game
         .entity_store
@@ -450,6 +469,7 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
 pub struct PlayerInfo {
     pub health: f32,
     pub food: u32,
+    pub air: i32,
     pub level: i32,
     pub game_mode: u8,
     pub effects: Vec<&'static str>,
@@ -475,6 +495,7 @@ pub fn player(game: &GameState) -> PlayerInfo {
     PlayerInfo {
         health: player.health,
         food: player.food,
+        air: player.air_supply,
         level: player.experience_level,
         game_mode: player.game_mode,
         effects: player.effects.names().collect(),

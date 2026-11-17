@@ -7,7 +7,7 @@ use std::time::Instant;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::ui::text::{TextSpan, format_text_spans};
+use crate::ui::text::{TextSpan, component_from_json, format_component_spans, legacy_format_spans};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
@@ -40,8 +40,8 @@ pub enum PingState {
     Pinging,
     Success {
         motd: Vec<TextSpan>,
-        online: i32,
-        max: i32,
+        /// Online and maximum players; `None` when the server reports neither.
+        players: Option<(i32, i32)>,
         latency_ms: u64,
         version: String,
         /// The server's protocol number, reused at join time to skip the
@@ -137,16 +137,9 @@ async fn ping_server(
     generation: PingGeneration,
     spawned_gen: u64,
 ) {
-    use azalea_protocol::packets::status::ClientboundStatusPacket;
-    use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
-
     let result = async {
-        use azalea_protocol::address::ServerAddr;
-
-        let server_addr: ServerAddr = address
-            .as_str()
-            .try_into()
-            .map_err(|_| format!("Invalid address: {address}"))?;
+        let server_addr = crate::net::address::ServerAddr::parse(&address)
+            .ok_or_else(|| format!("Invalid address: {address}"))?;
         let (status, mut conn) = crate::net::resolve::request_status(&server_addr)
             .await
             .map_err(|e| format!("{address}: {e}"))?;
@@ -157,46 +150,47 @@ async fn ping_server(
             .unwrap_or_default()
             .as_millis() as u64;
 
-        conn.write_packet(ServerboundPingRequest { time })
+        conn.writer
+            .write(&pomme_protocol::status::encode_ping_request(time as i64))
             .await
             .map_err(|e| format!("Ping request failed: {e}"))?;
 
-        let _ = conn
-            .read_packet::<ClientboundStatusPacket>()
+        crate::net::resolve::read_status(&mut conn)
             .await
             .map_err(|e| format!("Pong failed: {e}"))?;
         let latency_ms = ping_start.elapsed().as_millis() as u64;
 
-        // Vanilla MOTD base color: 0x808080.
-        let motd = format_text_spans(&status.description, [0.5, 0.5, 0.5, 1.0]);
-        let version = status.version.name.clone();
+        let motd = motd_spans(&status.description);
+        // Vanilla `ServerStatusPinger`: a status without a version is "Old",
+        // protocol 0.
+        let (version, protocol) = status
+            .version
+            .map_or_else(|| ("Old".to_owned(), 0), |v| (v.name, v.protocol));
         // Keyed to the native version, not the launched one.
-        let compat = if status.version.protocol == pomme_protocol::version::NATIVE.protocol {
+        let compat = if protocol == pomme_protocol::version::NATIVE.protocol {
             Compat::Native
-        } else if crate::net::translate::joinable(status.version.protocol) {
-            let protocol = status.version.protocol;
+        } else if crate::net::translate::joinable(protocol) {
             tokio::task::spawn_blocking(move || crate::net::translate::prewarm(protocol));
             Compat::Translated
         } else {
             Compat::Incompatible
         };
-        let (online, max) = (status.players.online, status.players.max);
 
         let favicon_rgba = status.favicon.as_deref().and_then(decode_favicon);
+        let players = status.players.as_ref().map(|p| (p.online, p.max));
         let player_names: Vec<String> = status
             .players
-            .sample
-            .iter()
-            .map(|p| p.name.clone())
+            .into_iter()
+            .flat_map(|p| p.sample)
+            .map(|p| p.name)
             .collect();
 
         Ok(PingState::Success {
             motd,
-            online,
-            max,
+            players,
             latency_ms,
             version,
-            protocol: status.version.protocol,
+            protocol,
             compat,
             favicon_rgba,
             player_names,
@@ -240,9 +234,43 @@ pub fn is_valid_address(address: &str) -> bool {
             .is_some_and(|host| !host.is_empty())
 }
 
+/// Vanilla's MOTD base color, 0x808080.
+const MOTD_COLOR: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+
+/// A status description as the list draws it. Legacy codes are applied here,
+/// over each component's whole text, so one carries across the lines the
+/// entry later wraps it into (`StringSplitter.splitLines` keeps the style at
+/// a break).
+fn motd_spans(description: &serde_json::Value) -> Vec<TextSpan> {
+    let spans = format_component_spans(&component_from_json(description), MOTD_COLOR);
+    legacy_format_spans(&spans, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_motds_legacy_code_carries_past_its_line_break() {
+        const GREEN: [f32; 4] = [85.0 / 255.0, 1.0, 85.0 / 255.0, 1.0];
+        let spans = motd_spans(&serde_json::json!("\u{a7}aWelcome\nto the server"));
+        let [span] = spans.as_slice() else {
+            panic!("one span, got {spans:?}");
+        };
+        assert_eq!(span.text, "Welcome\nto the server");
+        assert_eq!(span.color, GREEN);
+
+        // Each component's text resets to its own style, as in vanilla.
+        let spans = motd_spans(&serde_json::json!([
+            {"text": "\u{a7}aone "},
+            {"text": "two", "color": "red"},
+            " three"
+        ]));
+        let colors: Vec<_> = spans.iter().map(|s| (s.text.as_str(), s.color)).collect();
+        assert_eq!(colors[0], ("one ", GREEN));
+        assert_eq!(colors[1].0, "two");
+        assert_eq!(colors[2], (" three", MOTD_COLOR));
+    }
 
     /// The launcher writes fields the client doesn't model (category); a
     /// client save must pass them through, not strip them.

@@ -24,6 +24,10 @@ const MATCH_TOLERANCE: u8 = 1;
 struct ScriptFile {
     #[serde(rename = "step")]
     steps: Vec<StepFile>,
+    /// Whether the script starts under the `deterministic` step; a script
+    /// about that noise itself turns it off.
+    #[serde(default = "starts_deterministic")]
+    deterministic: bool,
     /// The versions the script is valid on; `tools/ingame-test` reads them
     /// to skip it elsewhere.
     #[serde(default, rename = "min_version")]
@@ -48,6 +52,7 @@ struct StepFile {
     press: Option<protocol::Press>,
     key_down: Option<protocol::Key>,
     key_up: Option<protocol::Key>,
+    focus: Option<bool>,
     bind: Option<protocol::Bind>,
     option: Option<protocol::OptionSet>,
     deterministic: Option<bool>,
@@ -55,11 +60,15 @@ struct StepFile {
     chunk_arenas: Option<protocol::ChunkArenas>,
     hover: Option<protocol::Hover>,
     cursor: Option<[f32; 2]>,
+    cursor_to_button: Option<String>,
     scroll: Option<f32>,
     text: Option<String>,
     wait_ms: Option<u64>,
+    wait_ticks: Option<u64>,
     frame_times: Option<FrameTimes>,
     screenshot: Option<String>,
+    /// Leaves chat in a `screenshot`, which otherwise clears it first.
+    keep_chat: Option<bool>,
     match_screenshots: Option<[String; 2]>,
     expect: Option<Expect>,
     timeout_ms: Option<u64>,
@@ -92,9 +101,11 @@ enum Expect {
     Terrain(TerrainExpect),
     Distant(DistantExpect),
     Menu(MenuExpect),
+    Screen(ScreenExpect),
     List(ListExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
+    Recipes(RecipesExpect),
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -202,6 +213,7 @@ struct PlayerFields {
     /// Within half a health point.
     health: Option<f32>,
     food: Option<u32>,
+    air: Option<i32>,
     level: Option<i32>,
     game_mode: Option<u8>,
     /// An active effect, by registry path.
@@ -267,6 +279,15 @@ struct DistantAt {
     gone: bool,
 }
 
+/// The screen open outside a world (`title`, `server_list`,
+/// `direct_connect`), and optionally the Direct Connect address field's text.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenExpect {
+    screen: String,
+    address: Option<String>,
+}
+
 /// The open menu: a container's menu type (`generic_9x3`), `inventory`,
 /// `creative`, `pause` or `none`, and optionally its title.
 #[derive(Debug, PartialEq, Deserialize)]
@@ -298,16 +319,49 @@ struct ChatExpect {
     chat: String,
 }
 
+/// The recipe book; each field is checked when given.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipesExpect {
+    recipes: RecipesFields,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipesFields {
+    /// At least this many recipes known.
+    at_least: Option<usize>,
+    /// This many still highlighted as new.
+    highlighted: Option<usize>,
+}
+
 #[derive(Debug, PartialEq)]
 enum Step {
     Run(Command),
     Wait(Duration),
+    /// Game ticks, counted from the step's first frame. The commands after
+    /// it run on the frame it ends, so each reaches the same tick every run.
+    WaitTicks(u64),
     FrameTimes(Duration),
-    Screenshot(String),
+    Screenshot {
+        name: String,
+        keep_chat: bool,
+    },
     /// Two of the script's screenshots, which must match pixel for pixel to
     /// within [`MATCH_TOLERANCE`], but for at most this many pixels.
     MatchScreenshots([String; 2], usize),
     Expect(Expect, Duration),
+}
+
+impl Step {
+    /// Whether the step works outside a world, once a script has left it.
+    fn runs_anywhere(&self) -> bool {
+        match self {
+            Step::Run(command) => exec::runs_anywhere(command),
+            Step::Wait(_) | Step::Screenshot { .. } | Step::Expect(Expect::Screen(_), _) => true,
+            _ => false,
+        }
+    }
 }
 
 impl StepFile {
@@ -350,6 +404,9 @@ impl StepFile {
         if let Some(key) = self.key_up {
             steps.push(Step::Run(Command::KeyUp(key)));
         }
+        if let Some(focused) = self.focus {
+            steps.push(Step::Run(Command::Focus { focused }));
+        }
         if let Some(bind) = self.bind {
             steps.push(Step::Run(Command::Bind(bind)));
         }
@@ -371,6 +428,9 @@ impl StepFile {
         if let Some(at) = self.cursor {
             steps.push(Step::Run(Command::Cursor { at }));
         }
+        if let Some(label) = self.cursor_to_button {
+            steps.push(Step::Run(Command::CursorToButton { label }));
+        }
         if let Some(y) = self.scroll {
             steps.push(Step::Run(Command::Scroll { y }));
         }
@@ -380,11 +440,17 @@ impl StepFile {
         if let Some(ms) = self.wait_ms {
             steps.push(Step::Wait(Duration::from_millis(ms)));
         }
+        if let Some(ticks) = self.wait_ticks {
+            steps.push(Step::WaitTicks(ticks));
+        }
         if let Some(FrameTimes { ms }) = self.frame_times {
             steps.push(Step::FrameTimes(Duration::from_millis(ms)));
         }
         if let Some(name) = self.screenshot {
-            steps.push(Step::Screenshot(name));
+            steps.push(Step::Screenshot {
+                name,
+                keep_chat: self.keep_chat.unwrap_or(false),
+            });
         }
         if let Some(names) = self.match_screenshots {
             steps.push(Step::MatchScreenshots(
@@ -402,13 +468,20 @@ impl StepFile {
     }
 }
 
-fn parse(source: &str) -> Result<Vec<Step>, String> {
+fn starts_deterministic() -> bool {
+    true
+}
+
+/// The script's steps, and whether it starts deterministic.
+fn parse(source: &str) -> Result<(Vec<Step>, bool), String> {
     let file: ScriptFile = toml::from_str(source).map_err(|e| e.to_string())?;
-    file.steps
+    let steps = file
+        .steps
         .into_iter()
         .enumerate()
         .map(|(i, step)| step.into_step().map_err(|e| format!("step {}: {e}", i + 1)))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok((steps, file.deterministic))
 }
 
 #[derive(Serialize)]
@@ -493,10 +566,15 @@ struct Report<'a> {
 pub struct Script {
     name: String,
     steps: Vec<Step>,
+    /// Holds the frame's noise still from the first frame in game, as the
+    /// `deterministic` step does, until applied.
+    deterministic: bool,
     out_dir: PathBuf,
     started: Instant,
     next: usize,
     step_started: Option<Instant>,
+    /// The game tick a `wait_ticks` step started on.
+    tick_started: Option<u64>,
     /// The screenshot the current step is waiting on.
     pending_shot: Option<PathBuf>,
     /// The frames a `frame_times` step has seen, and when the last was.
@@ -509,7 +587,8 @@ impl Script {
     pub fn load(path: &Path, out_dir: Option<PathBuf>) -> Result<Self, String> {
         let source =
             std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let steps = parse(&source).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (steps, deterministic) =
+            parse(&source).map_err(|e| format!("{}: {e}", path.display()))?;
         let name = path
             .file_stem()
             .map_or("script".into(), |s| s.to_string_lossy().into_owned());
@@ -517,10 +596,12 @@ impl Script {
         Ok(Self {
             name,
             steps,
+            deterministic,
             out_dir,
             started: Instant::now(),
             next: 0,
             step_started: None,
+            tick_started: None,
             pending_shot: None,
             samples: Vec::new(),
             last_frame: None,
@@ -530,15 +611,48 @@ impl Script {
 
     /// Advances the script by one frame; `Some(exit code)` once it's done.
     pub fn tick(&mut self, core: &mut AppCore, phase: &mut AppPhase) -> Option<i32> {
+        let mut on_tick = false;
+        loop {
+            let step = self.next;
+            if let Some(code) = self.advance(core, phase) {
+                return Some(code);
+            }
+            let finished = self.next > step;
+            on_tick |= finished && matches!(self.steps[step], Step::WaitTicks(_));
+            // What follows a `wait_ticks` shares its frame: commands, and the
+            // next `wait_ticks`, which counts from the tick this one ended on.
+            let follows = matches!(
+                self.steps.get(self.next),
+                Some(Step::Run(_) | Step::WaitTicks(_))
+            );
+            if !(on_tick && finished && follows) {
+                return None;
+            }
+        }
+    }
+
+    /// Runs the current step; `Some(exit code)` once the script is done.
+    fn advance(&mut self, core: &mut AppCore, phase: &mut AppPhase) -> Option<i32> {
         if !matches!(phase, AppPhase::InGame { .. }) {
             let joined = self.next > 0 || self.step_started.is_some();
             if joined {
-                return Some(self.fail(format!("left the game ({})", exec::phase_name(phase))));
-            }
-            if self.started.elapsed() > JOIN_TIMEOUT {
+                match self.steps.get(self.next) {
+                    None => return Some(self.finish(true)),
+                    Some(step) if step.runs_anywhere() => {}
+                    Some(_) => {
+                        return Some(
+                            self.fail(format!("left the game ({})", exec::phase_name(phase))),
+                        );
+                    }
+                }
+            } else if self.started.elapsed() > JOIN_TIMEOUT {
                 return Some(self.fail("timed out joining".into()));
+            } else {
+                return None;
             }
-            return None;
+        }
+        if std::mem::take(&mut self.deterministic) {
+            exec::run(&Command::Deterministic, core, phase);
         }
         let Some(step) = self.steps.get(self.next) else {
             return Some(self.finish(true));
@@ -550,6 +664,13 @@ impl Script {
                 Outcome::Screenshot(_) => unreachable!("screenshots are their own step"),
             },
             Step::Wait(duration) => (started.elapsed() >= *duration).then_some(Ok(())),
+            Step::WaitTicks(ticks) => match &*phase {
+                AppPhase::InGame { game, .. } => {
+                    let from = *self.tick_started.get_or_insert(game.tick_count);
+                    (game.tick_count.wrapping_sub(from) >= *ticks).then_some(Ok(()))
+                }
+                _ => unreachable!("wait_ticks doesn't run outside a world"),
+            },
             Step::FrameTimes(duration) => {
                 let now = Instant::now();
                 if let (Some(last), AppPhase::InGame { gfx, .. }) = (self.last_frame, &*phase) {
@@ -566,12 +687,16 @@ impl Script {
                 self.last_frame = Some(now);
                 (started.elapsed() >= *duration && !self.samples.is_empty()).then_some(Ok(()))
             }
-            Step::Screenshot(name) => {
+            Step::Screenshot { name, keep_chat } => {
                 let path = match &self.pending_shot {
                     Some(path) => path.clone(),
                     None => {
                         let path = self.shot_path(name);
-                        exec::run(&Command::Screenshot { path: path.clone() }, core, phase);
+                        let shot = Command::Screenshot {
+                            path: path.clone(),
+                            keep_chat: *keep_chat,
+                        };
+                        exec::run(&shot, core, phase);
                         self.pending_shot = Some(path.clone());
                         path
                     }
@@ -597,6 +722,7 @@ impl Script {
         });
         self.next += 1;
         self.step_started = None;
+        self.tick_started = None;
         self.pending_shot = None;
         self.samples.clear();
         self.last_frame = None;
@@ -684,10 +810,20 @@ impl Script {
 
 /// Whether `expect` holds now; the error describes what was seen instead.
 fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String> {
+    if let Expect::Screen(ScreenExpect { screen, address }) = expect {
+        let (seen, field) = (core.menu.harness_screen(), core.menu.harness_address());
+        return ensure(
+            matches!(phase, AppPhase::InMenu { .. })
+                && seen == *screen
+                && address.as_ref().is_none_or(|address| address == field),
+            || format!("{} on {seen}, address {field:?}", exec::phase_name(phase)),
+        );
+    }
     let AppPhase::InGame { gfx, game, .. } = phase else {
         return Err(format!("not in game ({})", exec::phase_name(phase)));
     };
     match expect {
+        Expect::Screen(_) => unreachable!("checked before the in-game gate"),
         Expect::Slot(SlotExpect {
             slot,
             item,
@@ -773,6 +909,7 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
             ensure(
                 want.health.is_none_or(|h| (seen.health - h).abs() <= 0.5)
                     && want.food.is_none_or(|f| seen.food == f)
+                    && want.air.is_none_or(|a| seen.air == a)
                     && want.level.is_none_or(|l| seen.level == l)
                     && want.game_mode.is_none_or(|m| seen.game_mode == m)
                     && want.effect.as_deref().is_none_or(has)
@@ -932,6 +1069,15 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                 .any(|line| line.contains(chat.as_str())),
             || format!("no chat line containing {chat:?}"),
         ),
+        Expect::Recipes(RecipesExpect { recipes: want }) => {
+            let known = game.recipe_book.known_in_vanilla_order().len();
+            let highlighted = game.recipe_book.highlight.len();
+            ensure(
+                want.at_least.is_none_or(|n| known >= n)
+                    && want.highlighted.is_none_or(|n| highlighted == n),
+                || format!("{known} recipes known, {highlighted} highlighted"),
+            )
+        }
     }
 }
 
@@ -951,8 +1097,15 @@ mod tests {
     use crate::harness::protocol::{Bind, ClickKind, Hand, OptionSet, Press};
 
     #[test]
+    fn parses_a_tick_wait() {
+        let (steps, _) = parse("[[step]]\nwait_ticks = 20").unwrap();
+        assert_eq!(steps, [Step::WaitTicks(20)]);
+        assert!(!steps[0].runs_anywhere());
+    }
+
+    #[test]
     fn parses_every_step_kind() {
-        let steps = parse(
+        let (steps, _) = parse(
             r#"
             [[step]]
             chat = "/give @s stone"
@@ -1002,10 +1155,27 @@ mod tests {
             max_differing_pixels = 64
             [[step]]
             hold_packets = true
+            [[step]]
+            focus = false
+            [[step]]
+            screenshot = "chat"
+            keep_chat = true
             "#,
         )
         .unwrap();
-        assert_eq!(steps.len(), 23);
+        assert_eq!(steps.len(), 25);
+        assert_eq!(steps[23], Step::Run(Command::Focus { focused: false }));
+        assert!(steps.contains(&Step::Screenshot {
+            name: "inventory".into(),
+            keep_chat: false,
+        }));
+        assert_eq!(
+            steps[24],
+            Step::Screenshot {
+                name: "chat".into(),
+                keep_chat: true,
+            }
+        );
         assert_eq!(steps[20], Step::Run(Command::Deterministic));
         assert_eq!(
             steps[21],
@@ -1023,6 +1193,8 @@ mod tests {
                 distant_terrain: None,
                 resource_pack: None,
                 show_subtitles: None,
+                chunk_fade: None,
+                inactivity_fps_limit: None,
             }))
         );
         assert_eq!(
@@ -1100,8 +1272,18 @@ mod tests {
     }
 
     #[test]
+    fn scripts_start_deterministic_unless_turned_off() {
+        assert!(parse("[[step]]\nwait_ms = 1").unwrap().1);
+        assert!(
+            !parse("deterministic = false\n[[step]]\nwait_ms = 1")
+                .unwrap()
+                .1
+        );
+    }
+
+    #[test]
     fn frame_times_parse_and_sum_up_with_the_slowest_hundredth() {
-        let steps = parse("[[step]]\nframe_times = { ms = 5000 }").unwrap();
+        let (steps, _) = parse("[[step]]\nframe_times = { ms = 5000 }").unwrap();
         assert_eq!(steps, [Step::FrameTimes(Duration::from_secs(5))]);
         // 198 frames of 10 ms and 2 of 50 ms: the 1% low is the slowest 2.
         let samples: Vec<FrameSample> = (0..200)
